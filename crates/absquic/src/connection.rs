@@ -1,7 +1,7 @@
-//! tx3_quic Connection
+//! absquic Connection
 
+use crate::AqResult;
 use crate::OutChan;
-use crate::Tx3Result;
 //use crate::types::*;
 use crate::driver::*;
 use std::future::Future;
@@ -55,12 +55,16 @@ impl ConnectionEvtSrc {
     }
 
     /// wait until this connection is connected
-    pub async fn connected(mut self) -> Tx3Result<Self> {
+    pub async fn connected(mut self) -> AqResult<Self> {
         while let Some(evt) = self.recv().await {
             match evt {
                 ConnectionEvt::HandshakeDataReady => (),
                 ConnectionEvt::Connected => return Ok(self),
-                oth => return Err(format!("awaiting connected, got: {:?}", oth).into()),
+                oth => {
+                    return Err(
+                        format!("awaiting connected, got: {:?}", oth).into()
+                    )
+                }
             }
         }
         Err("awaiting connected, got end of stream".into())
@@ -76,7 +80,7 @@ pub struct Connection(
 
 impl Connection {
     /// Get the current remote address this connection is bound to
-    pub fn remote_address(&self) -> Tx3Result<SocketAddr> {
+    pub fn remote_address(&self) -> AqResult<SocketAddr> {
         self.0.con_remote_addr(self.1)
     }
 }

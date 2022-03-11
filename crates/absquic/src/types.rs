@@ -1,6 +1,6 @@
 //! items you probably don't need unless you're implementing a custom backend
 
-use crate::Tx3Result;
+use crate::AqResult;
 pub use bytes::BytesMut;
 pub use quinn_proto::EcnCodepoint;
 pub use quinn_proto::Transmit;
@@ -28,7 +28,7 @@ pub struct InPacket {
 /// Trait defining a tx3_quic backend udp implementation
 pub trait Backend: 'static + Send {
     /// Get the local address of this backend udp socket
-    fn local_addr(&self) -> Tx3Result<SocketAddr>;
+    fn local_addr(&self) -> AqResult<SocketAddr>;
 
     /// Get the recommended batch size for this backend udp socket
     fn batch_size(&self) -> usize;
@@ -45,7 +45,7 @@ pub trait Backend: 'static + Send {
         &mut self,
         cx: &mut Context<'_>,
         data: &mut VecDeque<Transmit>,
-    ) -> Poll<Tx3Result<()>>;
+    ) -> Poll<AqResult<()>>;
 
     /// Recv data from this backend udp socket
     /// will not fill queue beyond `limit` items
@@ -54,5 +54,5 @@ pub trait Backend: 'static + Send {
         cx: &mut Context<'_>,
         data: &mut VecDeque<InPacket>,
         limit: usize,
-    ) -> Poll<Tx3Result<usize>>;
+    ) -> Poll<AqResult<usize>>;
 }

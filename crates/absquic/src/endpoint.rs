@@ -1,10 +1,10 @@
-//! tx3_quic Endpoint
+//! absquic Endpoint
 
 use crate::connection::*;
 use crate::driver::*;
 use crate::types::*;
+use crate::AqResult;
 use crate::OutChan;
-use crate::Tx3Result;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -77,7 +77,7 @@ impl Endpoint {
     }
 
     /// get the current local address this endpoint is bound to
-    pub fn local_addr(&self) -> Tx3Result<SocketAddr> {
+    pub fn local_addr(&self) -> AqResult<SocketAddr> {
         self.0.local_addr()
     }
 
@@ -86,7 +86,7 @@ impl Endpoint {
         &self,
         remote: SocketAddr,
         server_name: &str,
-    ) -> Tx3Result<(Connection, ConnectionEvtSrc)> {
+    ) -> AqResult<(Connection, ConnectionEvtSrc)> {
         self.0.connect(self.1.clone(), remote, server_name)
     }
 }

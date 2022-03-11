@@ -1,10 +1,10 @@
-//! tx3_quic Endpoint Driver
+//! absquic Endpoint Driver
 
 use crate::connection::*;
 use crate::endpoint::EndpointEvt;
 use crate::types::*;
+use crate::AqResult;
 use crate::OutChan;
-use crate::Tx3Result;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -47,11 +47,18 @@ pub trait AsScheduledFactory: 'static + Send + Sync {
 pub type DynScheduledFactory =
     Arc<dyn AsScheduledFactory + 'static + Send + Sync>;
 
+/*
+struct StreamInner {
+
+}
+*/
+
 struct ConnectionInner {
     con: quinn_proto::Connection,
     sched: Option<DynScheduled>,
     timeout: bool,
     connection_evt: OutChan<ConnectionEvt>,
+    //streams: HashMap<quinn_proto::StreamId, StreamInner>,
 }
 
 struct DriverInner {
@@ -82,6 +89,7 @@ fn register_con(
             sched: None,
             timeout: false,
             connection_evt,
+            //streams: HashMap::new(),
         },
     );
     let con = Connection(core, hnd);
@@ -93,7 +101,7 @@ fn con_evt(
     connections: &mut HashMap<quinn_proto::ConnectionHandle, ConnectionInner>,
     hnd: quinn_proto::ConnectionHandle,
     evt: quinn_proto::ConnectionEvent,
-) -> Tx3Result<()> {
+) -> AqResult<()> {
     if let Some(con) = connections.get_mut(&hnd) {
         con.con.handle_event(evt);
     }
@@ -130,9 +138,12 @@ impl DriverInner {
         pend_safe: &mut bool,
         cx: &mut Context<'_>,
         endpoint_evt: &mut VecDeque<EndpointEvt>,
-        connection_evt: &mut VecDeque<(OutChan<ConnectionEvt>, VecDeque<ConnectionEvt>)>,
+        connection_evt: &mut VecDeque<(
+            OutChan<ConnectionEvt>,
+            VecDeque<ConnectionEvt>,
+        )>,
         core: DriverCore,
-    ) -> Tx3Result<()> {
+    ) -> AqResult<()> {
         // the order here is important, consider carefully before changing
         self.receive(pend_safe, cx, endpoint_evt, core)?;
         self.connections(pend_safe, connection_evt)?;
@@ -147,7 +158,7 @@ impl DriverInner {
         cx: &mut Context<'_>,
         endpoint_evt: &mut VecDeque<EndpointEvt>,
         core: DriverCore,
-    ) -> Tx3Result<()> {
+    ) -> AqResult<()> {
         let DriverInner {
             backend,
             endpoint,
@@ -211,8 +222,11 @@ impl DriverInner {
     fn connections(
         &mut self,
         pend_safe: &mut bool,
-        connection_evt: &mut VecDeque<(OutChan<ConnectionEvt>, VecDeque<ConnectionEvt>)>,
-    ) -> Tx3Result<()> {
+        connection_evt: &mut VecDeque<(
+            OutChan<ConnectionEvt>,
+            VecDeque<ConnectionEvt>,
+        )>,
+    ) -> AqResult<()> {
         let DriverInner {
             weak_this,
             schedule_timeout,
@@ -297,21 +311,25 @@ impl DriverInner {
                 while let Some(evt) = con.con.poll() {
                     match evt {
                         quinn_proto::Event::HandshakeDataReady => {
-                            con_evt_out.push_back(ConnectionEvt::HandshakeDataReady);
+                            con_evt_out
+                                .push_back(ConnectionEvt::HandshakeDataReady);
                         }
                         quinn_proto::Event::Connected => {
                             con_evt_out.push_back(ConnectionEvt::Connected);
                         }
                         quinn_proto::Event::ConnectionLost { reason } => {
-                            con_evt_out.push_back(ConnectionEvt::ConnectionLost(reason.to_string().into()));
+                            con_evt_out.push_back(
+                                ConnectionEvt::ConnectionLost(
+                                    reason.to_string().into(),
+                                ),
+                            );
                         }
                         quinn_proto::Event::Stream(_evt) => {
                             // TODO FIXME
                             panic!("stream evt");
                         }
                         quinn_proto::Event::DatagramReceived => {
-                            // TODO FIXME
-                            panic!("datagram received");
+                            // no-op
                         }
                     }
                 }
@@ -323,7 +341,8 @@ impl DriverInner {
             }
 
             if !con_evt_out.is_empty() {
-                connection_evt.push_back((con.connection_evt.clone(), con_evt_out));
+                connection_evt
+                    .push_back((con.connection_evt.clone(), con_evt_out));
             }
         }
 
@@ -334,7 +353,7 @@ impl DriverInner {
         &mut self,
         pend_safe: &mut bool,
         cx: &mut Context<'_>,
-    ) -> Tx3Result<()> {
+    ) -> AqResult<()> {
         let DriverInner {
             backend,
             endpoint,
@@ -405,7 +424,7 @@ impl DriverCore {
         (out, endpoint_evt)
     }
 
-    pub(crate) fn local_addr(&self) -> Tx3Result<SocketAddr> {
+    pub(crate) fn local_addr(&self) -> AqResult<SocketAddr> {
         self.0.inner.lock().backend.local_addr()
     }
 
@@ -414,7 +433,7 @@ impl DriverCore {
         config: quinn_proto::ClientConfig,
         remote: SocketAddr,
         server_name: &str,
-    ) -> Tx3Result<(Connection, ConnectionEvtSrc)> {
+    ) -> AqResult<(Connection, ConnectionEvtSrc)> {
         let (driver_waker, con, evt) = {
             let mut inner = self.0.inner.lock();
             let (hnd, con) = inner
@@ -435,7 +454,7 @@ impl DriverCore {
     pub(crate) fn con_remote_addr(
         &self,
         hnd: quinn_proto::ConnectionHandle,
-    ) -> Tx3Result<SocketAddr> {
+    ) -> AqResult<SocketAddr> {
         match self.0.inner.lock().connections.get(&hnd) {
             Some(c) => Ok(c.con.remote_address()),
             None => Err("InvalidConnectionHandle".into()),
@@ -448,7 +467,10 @@ impl DriverCore {
         self,
         cx: &mut Context<'_>,
         endpoint_evt: &mut VecDeque<EndpointEvt>,
-        connection_evt: &mut VecDeque<(OutChan<ConnectionEvt>, VecDeque<ConnectionEvt>)>,
+        connection_evt: &mut VecDeque<(
+            OutChan<ConnectionEvt>,
+            VecDeque<ConnectionEvt>,
+        )>,
         core: DriverCore,
     ) -> Poll<()> {
         let mut pend_safe = true;
@@ -462,9 +484,13 @@ impl DriverCore {
             // and on average fairly release it if we're taking too much cpu
             let mut inner = self.0.inner.lock();
 
-            if let Err(e) =
-                inner.poll(&mut pend_safe, cx, endpoint_evt, connection_evt, core.clone())
-            {
+            if let Err(e) = inner.poll(
+                &mut pend_safe,
+                cx,
+                endpoint_evt,
+                connection_evt,
+                core.clone(),
+            ) {
                 // TODO - tracing error?? then exit ready??
                 panic!("{:?}", e);
             }
