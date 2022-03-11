@@ -12,7 +12,14 @@ use std::task::Waker;
 
 /// Util struct to aggregate wakers we want to wake later
 /// usually after a synchronization lock has been released
+/// Dropping this struct will wake all aggregated wakers
 pub struct WakeLater(Vec<Waker>);
+
+impl Drop for WakeLater {
+    fn drop(&mut self) {
+        self.wake();
+    }
+}
 
 impl Default for WakeLater {
     fn default() -> Self {
@@ -147,6 +154,11 @@ impl<T: 'static + Send> Drop for OutChanSender<T> {
 }
 
 impl<T: 'static + Send> OutChanSender<T> {
+    /// is this channel closed
+    pub fn is_closed(&self) -> bool {
+        self.0.lock().closed
+    }
+
     /// push data into this channel
     pub fn push(
         &self,
@@ -225,6 +237,7 @@ pub fn out_chan<T: 'static + Send>() -> (OutChanSender<T>, OutChanReceiver<T>) {
 struct InChanInner<T: 'static + Send> {
     closed: bool,
     buffer: VecDeque<T>,
+    waker: Option<Waker>,
 }
 
 type InChanCore<T> = Arc<Mutex<InChanInner<T>>>;
@@ -240,20 +253,31 @@ impl<T: 'static + Send> Clone for InChanSender<T> {
 
 impl<T: 'static + Send> Drop for InChanSender<T> {
     fn drop(&mut self) {
-        self.0.lock().closed = true;
+        if let Some(waker) = {
+            let mut inner = self.0.lock();
+            inner.closed = true;
+            inner.waker.take()
+        } {
+            waker.wake();
+        }
     }
 }
 
 impl<T: 'static + Send> InChanSender<T> {
     /// send data into the channel
     pub fn send(&self, t: T) -> AqResult<()> {
-        let mut inner = self.0.lock();
-        if inner.closed {
-            Err("ChannelClosed".into())
-        } else {
-            inner.buffer.push_back(t);
-            Ok(())
+        if let Some(waker) = {
+            let mut inner = self.0.lock();
+            if inner.closed {
+                return Err("ChannelClosed".into());
+            } else {
+                inner.buffer.push_back(t);
+            }
+            inner.waker.take()
+        } {
+            waker.wake();
         }
+        Ok(())
     }
 }
 
@@ -267,6 +291,12 @@ impl<T: 'static + Send> Drop for InChanReceiver<T> {
 }
 
 impl<T: 'static + Send> InChanReceiver<T> {
+    /// register a waker that will be triggered
+    /// on new incoming send
+    pub fn register_waker(&self, waker: Waker) {
+        self.0.lock().waker = Some(waker);
+    }
+
     /// receive data from the channel
     pub fn recv(
         &self,
@@ -290,7 +320,184 @@ pub fn in_chan<T: 'static + Send>() -> (InChanSender<T>, InChanReceiver<T>) {
     let inner = InChanInner {
         closed: false,
         buffer: VecDeque::new(),
+        waker: None,
     };
     let core = Arc::new(Mutex::new(inner));
     (InChanSender(core.clone()), InChanReceiver(core))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use futures::future::FutureExt;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_one_shot() {
+        let mut all = Vec::with_capacity(40);
+
+        for _ in 0..10 {
+            let (s, r) = one_shot_channel();
+            all.push(
+                async move {
+                    let mut wake_later = WakeLater::new();
+                    s.send(&mut wake_later, ());
+                    wake_later.wake();
+                }
+                .boxed(),
+            );
+            all.push(
+                async move {
+                    let _ = r.recv().await;
+                }
+                .boxed(),
+            );
+        }
+
+        for _ in 0..10 {
+            let (s, r) = one_shot_channel();
+            all.push(
+                async move {
+                    let _ = tokio::task::spawn(async move {
+                        let mut wake_later = WakeLater::new();
+                        s.send(&mut wake_later, ());
+                        wake_later.wake();
+                    })
+                    .await;
+                }
+                .boxed(),
+            );
+            all.push(
+                async move {
+                    let _ = tokio::task::spawn(async move {
+                        let _ = r.recv().await;
+                    })
+                    .await;
+                }
+                .boxed(),
+            );
+        }
+
+        futures::future::join_all(all).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_out_chan_send_drop_close() {
+        let (s, mut r) = out_chan::<()>();
+        let task = tokio::task::spawn(async move {
+            assert!(matches!(r.recv().await, None));
+        });
+        drop(s);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_out_chan_send_explicit_close() {
+        let (s, mut r) = out_chan::<()>();
+        let task = tokio::task::spawn(async move {
+            assert!(matches!(r.recv().await, None));
+        });
+        let mut should_close = false;
+        let mut out = VecDeque::new();
+        s.push(&mut should_close, &mut WakeLater::new(), &mut out, true);
+        assert!(should_close);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_out_chan_recv_close() {
+        let (s, r) = out_chan::<()>();
+        drop(r);
+        let mut should_close = false;
+        let mut out = VecDeque::new();
+        out.push_back(());
+        s.push(&mut should_close, &mut WakeLater::new(), &mut out, false);
+        assert!(should_close);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_out_chan_some() {
+        let (s, mut r) = out_chan::<()>();
+        let task = tokio::task::spawn(async move {
+            assert!(matches!(r.recv().await, Some(())));
+            assert!(matches!(r.recv().await, Some(())));
+            assert!(matches!(r.recv().await, None));
+        });
+        let mut should_close = false;
+        let mut out = VecDeque::new();
+        out.push_back(());
+        out.push_back(());
+        s.push(&mut should_close, &mut WakeLater::new(), &mut out, false);
+        drop(s);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_in_chan_recv_drop() {
+        let (s, r) = in_chan::<()>();
+        drop(r);
+        assert!(s.send(()).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_in_chan_send_drop() {
+        let (s, r) = in_chan::<()>();
+        drop(s);
+        let mut should_close = false;
+        let mut buf = VecDeque::new();
+        r.recv(&mut should_close, &mut buf, false);
+        assert!(should_close);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_in_chan_wake() {
+        struct X(InChanReceiver<()>);
+
+        impl Future for X {
+            type Output = ();
+
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Self::Output> {
+                let mut should_close = false;
+                let mut buf = VecDeque::new();
+                self.0.recv(&mut should_close, &mut buf, false);
+                if buf.is_empty() {
+                    self.0.register_waker(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            }
+        }
+
+        struct W(Mutex<usize>);
+
+        impl futures::task::ArcWake for W {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                *arc_self.0.lock() += 1;
+            }
+        }
+
+        let waker_inner = Arc::new(W(Mutex::new(0)));
+
+        let waker = futures::task::waker(waker_inner.clone());
+        let mut cx = Context::from_waker(&waker);
+
+        let (s, r) = in_chan::<()>();
+
+        let mut x = X(r);
+        assert!(matches!(
+            std::pin::Pin::new(&mut x).poll(&mut cx),
+            Poll::Pending
+        ));
+        assert_eq!(0, *waker_inner.0.lock());
+
+        s.send(()).unwrap();
+        assert_eq!(1, *waker_inner.0.lock());
+        assert!(matches!(
+            std::pin::Pin::new(&mut x).poll(&mut cx),
+            Poll::Ready(())
+        ));
+    }
 }

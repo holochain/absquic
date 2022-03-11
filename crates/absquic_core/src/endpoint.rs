@@ -1,9 +1,11 @@
 //! absquic_core endpoint types
 
+use crate::backend::*;
 use crate::connection::*;
 use crate::util::*;
 use crate::AqResult;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 /// types only relevant when implementing a quic state machine backend
 pub mod backend {
@@ -26,14 +28,6 @@ pub mod backend {
             cb: OneShotSender<AqResult<(Connection, ConnectionRecv)>>,
         },
     }
-
-    /// as a backend library, construct an absquic endpoint instance
-    pub fn construct_endpoint(
-        command_sender: InChanSender<EndpointCmd>,
-        event_receiver: OutChanReceiver<EndpointEvt>,
-    ) -> (Endpoint, EndpointRecv) {
-        (Endpoint(command_sender), event_receiver)
-    }
 }
 
 use backend::*;
@@ -55,6 +49,16 @@ pub type EndpointRecv = OutChanReceiver<EndpointEvt>;
 pub struct Endpoint(InChanSender<EndpointCmd>);
 
 impl Endpoint {
+    /// construct a new endpoint
+    pub async fn new(
+        udp_backend: Arc<dyn UdpBackendFactory>,
+        backend_driver: Arc<dyn BackendDriverFactory>,
+    ) -> AqResult<(Endpoint, EndpointRecv, BackendDriver)> {
+        let (cmd_send, evt_recv, driver) =
+            backend_driver.construct_endpoint(udp_backend).await?;
+        Ok((Endpoint(cmd_send), evt_recv, driver))
+    }
+
     /// the current address this endpoint is bound to
     pub async fn local_address(&self) -> AqResult<SocketAddr> {
         let (s, r) = one_shot_channel();
