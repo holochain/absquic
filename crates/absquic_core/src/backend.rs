@@ -22,18 +22,18 @@ pub struct OutUdpPacket {
     /// destination address
     pub dst_addr: SocketAddr,
 
+    /// source ip
+    pub src_ip: Option<IpAddr>,
+
+    /// if this packet contains multiple datagrams
+    pub segment_size: Option<usize>,
+
     /// explicit congestion notification
     pub ecn: Option<u8>,
 
     /// would be nice if this were bytes::BytesMut,
     /// but this needs to match the quinn_proto api
     pub data: Vec<u8>,
-
-    /// if this packet contains multiple datagrams
-    pub segment_size: Option<usize>,
-
-    /// source ip
-    pub src_ip: Option<IpAddr>,
 }
 
 /// Incoming Raw Udp Packet Struct

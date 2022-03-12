@@ -11,18 +11,10 @@ use std::net::SocketAddr;
 use std::task::Context;
 use std::task::Poll;
 
-/// TODO - better way to do this??
-/// WARNING - the OutUdpPacket struct must exactly match the Transmit struct
-#[allow(unsafe_code)]
-fn danger_horrible_transmute(
-    input: &[OutUdpPacket],
-) -> &[quinn_proto::Transmit] {
-    unsafe { std::mem::transmute(input) }
-}
-
 struct QuinnUdpBackend {
     state: quinn_udp::UdpState,
     socket: quinn_udp::UdpSocket,
+    write_bufs: VecDeque<quinn_proto::Transmit>,
     read_bufs: Box<[bytes::BytesMut]>,
 }
 
@@ -44,23 +36,41 @@ impl UdpBackend for QuinnUdpBackend {
         cx: &mut Context<'_>,
         data: &mut VecDeque<OutUdpPacket>,
     ) -> Poll<AqResult<()>> {
-        let len = data.len();
-        if len == 0 {
+        while self.write_bufs.len() < quinn_udp::BATCH_SIZE && !data.is_empty()
+        {
+            let OutUdpPacket {
+                dst_addr,
+                ecn,
+                data,
+                segment_size,
+                src_ip,
+            } = data.pop_front().unwrap();
+            self.write_bufs.push_back(quinn_proto::Transmit {
+                destination: dst_addr,
+                ecn: ecn
+                    .map(|ecn| quinn_proto::EcnCodepoint::from_bits(ecn))
+                    .flatten(),
+                contents: data,
+                segment_size,
+                src_ip,
+            });
+        }
+
+        if self.write_bufs.is_empty() {
             return Poll::Ready(Ok(()));
         }
-        data.make_contiguous();
-        let Self { state, socket, .. } = self;
-        let count = {
-            let in_count = std::cmp::min(len, quinn_udp::BATCH_SIZE);
-            let data =
-                danger_horrible_transmute(&data.as_slices().0[0..in_count]);
-            match socket.poll_send(state, cx, data) {
+
+        self.write_bufs.make_contiguous();
+
+        let Self { state, socket, write_bufs, .. } = self;
+        let count =
+            match socket.poll_send(state, cx, write_bufs.as_slices().0) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
                 Poll::Ready(Ok(count)) => count,
-            }
-        };
-        data.drain(..count);
+            };
+        println!("wrote {}", count);
+        write_bufs.drain(..count);
         Poll::Ready(Ok(()))
     }
 
@@ -94,7 +104,6 @@ impl UdpBackend for QuinnUdpBackend {
                 for (meta, buf) in
                     meta.into_iter().zip(bufs.iter()).take(msg_count)
                 {
-                    println!("@@@ - meta.len: {}", meta.len);
                     let buf = buf[0..meta.len].into();
                     let packet = InUdpPacket {
                         src_addr: meta.addr,
@@ -102,6 +111,7 @@ impl UdpBackend for QuinnUdpBackend {
                         ecn: meta.ecn.map(|ecn| ecn as u8),
                         data: buf,
                     };
+                    println!("read 1 {:?}", &packet.data[..8]);
                     data.push_back(packet);
                 }
                 Poll::Ready(Ok(()))
@@ -143,6 +153,7 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
             let backend = QuinnUdpBackend {
                 state: quinn_udp::UdpState::new(),
                 socket,
+                write_bufs: VecDeque::with_capacity(quinn_udp::BATCH_SIZE),
                 read_bufs: read_bufs.into_boxed_slice(),
             };
             let backend: Box<dyn UdpBackend> = Box::new(backend);

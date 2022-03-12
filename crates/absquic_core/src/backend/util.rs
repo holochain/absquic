@@ -33,7 +33,7 @@ impl UdpTestDriver {
             match socket.poll_send(cx, in_buf) {
                 Poll::Ready(Err(e)) => panic!("{:?}", e),
                 Poll::Pending => {
-                    println!("udp send pend");
+                    //println!("udp send pend");
                     return;
                 }
                 _ => (),
@@ -42,7 +42,7 @@ impl UdpTestDriver {
 
         in_recv.register_waker(cx.waker().clone());
 
-        println!("udp send no work");
+        //println!("udp send no work");
     }
 
     fn poll_recv(&mut self, cx: &mut Context<'_>) {
@@ -58,7 +58,7 @@ impl UdpTestDriver {
             match socket.poll_recv(cx, out_buf) {
                 Poll::Ready(Err(e)) => panic!("{:?}", e),
                 Poll::Pending => {
-                    println!("udp recv pend");
+                    //println!("udp recv pend");
                     break;
                 }
                 _ => (),
@@ -88,16 +88,18 @@ impl Future for UdpTestDriver {
         self.poll_send(cx);
         self.poll_recv(cx);
         let shutdown = self.shutdown.load(atomic::Ordering::SeqCst);
+        /*
         println!(
             "post-poll: shutdown: {}, want_close: {}",
             shutdown, self.want_close
         );
+        */
         if shutdown
             || (self.want_close
                 && self.in_buf.is_empty()
                 && self.out_buf.is_empty())
         {
-            println!("test driver exit");
+            //println!("test driver exit");
             Poll::Ready(())
         } else {
             Poll::Pending
