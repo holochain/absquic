@@ -7,6 +7,7 @@ edition = "2021"
 bytes = "1.1.0"
 one_err = "0.0.5"
 parking_lot = "0.12.0"
+tokio = { version = "1.17.0", features = [ "sync" ] }
 
 [dev-dependencies]
 futures = "0.3.21"

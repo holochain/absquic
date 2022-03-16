@@ -7,6 +7,7 @@ edition = "2021"
 absquic_core = { version = "0.0.1", path = "../absquic_core" }
 quinn-proto = { version = "0.8.1", default-features = false }
 quinn-udp = { version = "0.1.1", default-features = false }
+tokio = { version = "1.17.0", features = [ "sync" ] }
 
 [dev-dependencies]
 criterion = { version = "0.3.5", features = [ "async_tokio" ] }

@@ -1,3 +1,4 @@
+/*
 use crate::*;
 use absquic_core::backend::util::*;
 use absquic_core::util::*;
@@ -89,3 +90,4 @@ async fn test_udp() {
     // make sure the endpoint drivers shut down
     futures::future::try_join_all(driver_tasks).await.unwrap();
 }
+*/

@@ -77,7 +77,7 @@ impl Connection {
     /// the current address associated with the remote side of this connection
     pub async fn remote_address(&self) -> AqResult<SocketAddr> {
         let (s, r) = one_shot_channel();
-        self.0.send(ConnectionCmd::GetRemoteAddress(s))?;
+        self.0.send(ConnectionCmd::GetRemoteAddress(s)).await?;
         r.recv()
             .await
             .ok_or_else(|| one_err::OneErr::new("ConnectionClosed"))?
@@ -86,7 +86,7 @@ impl Connection {
     /// open a new outgoing uni-directional stream
     pub async fn open_uni_stream(&self) -> AqResult<WriteStream> {
         let (s, r) = one_shot_channel();
-        self.0.send(ConnectionCmd::OpenUniStream(s))?;
+        self.0.send(ConnectionCmd::OpenUniStream(s)).await?;
         r.recv()
             .await
             .ok_or_else(|| one_err::OneErr::new("ConnectionClosed"))?

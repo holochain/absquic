@@ -62,7 +62,7 @@ impl Endpoint {
     /// the current address this endpoint is bound to
     pub async fn local_address(&self) -> AqResult<SocketAddr> {
         let (s, r) = one_shot_channel();
-        self.0.send(EndpointCmd::GetLocalAddress(s))?;
+        self.0.send(EndpointCmd::GetLocalAddress(s)).await?;
         r.recv()
             .await
             .ok_or_else(|| one_err::OneErr::new("EndpointClosed"))?
@@ -75,11 +75,13 @@ impl Endpoint {
         server_name: String,
     ) -> AqResult<(Connection, ConnectionRecv)> {
         let (s, r) = one_shot_channel();
-        self.0.send(EndpointCmd::Connect {
-            addr,
-            server_name,
-            cb: s,
-        })?;
+        self.0
+            .send(EndpointCmd::Connect {
+                addr,
+                server_name,
+                cb: s,
+            })
+            .await?;
         r.recv()
             .await
             .ok_or_else(|| one_err::OneErr::new("EndpointClosed"))?
