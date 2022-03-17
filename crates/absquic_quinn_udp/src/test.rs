@@ -1,93 +1,60 @@
-/*
 use crate::*;
-use absquic_core::backend::util::*;
-use absquic_core::util::*;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_udp() {
-    let mut driver_tasks = Vec::new();
-    let mut test_tasks = Vec::new();
+    let factory = QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
 
-    let socket1 = QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
-    let socket1 = socket1.bind().await.unwrap();
-    let addr1 = socket1.local_addr().unwrap();
-    println!("socket1 addr: {:?}", addr1);
+    let (s1, r1, d1) = factory.bind().await.unwrap();
+    let t1 = tokio::task::spawn(d1);
 
-    let socket2 = QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
-    let socket2 = socket2.bind().await.unwrap();
-    let addr2 = socket2.local_addr().unwrap();
-    println!("socket2 addr: {:?}", addr2);
+    let (s2, mut r2, d2) = factory.bind().await.unwrap();
+    let t2 = tokio::task::spawn(d2);
 
-    let (send1, recv1, driver1, shutdown1) = udp_test(socket1);
-    let (send2, recv2, driver2, shutdown2) = udp_test(socket2);
+    let addr2 = s2.local_addr().await.unwrap();
+    println!("addr2: {:?}", addr2);
 
-    // cross-link these senders / receivers
-    // so ep1 waits on ep2 and the reverse
-    let (ep2_s, ep1_r) = one_shot_channel::<()>();
-    let (ep1_s, ep2_r) = one_shot_channel::<()>();
+    let (os, or) = tokio::sync::oneshot::channel();
 
-    // -- endpoint 1 -- //
+    let tr2 = tokio::task::spawn(async move {
+        let data = r2.recv().await;
+        let _ = os.send(());
 
-    driver_tasks.push(tokio::task::spawn(driver1));
-    test_tasks.push(tokio::task::spawn(async move {
-        let mut recv1 = recv1;
-        for _ in 0..2 {
-            println!("recv1: {:?}", recv1.recv().await);
-        }
-        ep1_s.send(&mut WakeLater::new(), ());
-        println!("recv1 ending");
-    }));
-    test_tasks.push(tokio::task::spawn(async move {
-        let addr2 = &addr2;
-        for _ in 0..2 {
-            send1
-                .send(OutUdpPacket {
-                    dst_addr: *addr2,
-                    ecn: None,
-                    data: b"hello".to_vec(),
-                    segment_size: None,
-                    src_ip: None,
-                })
-                .unwrap();
-        }
-        let _ = ep1_r.recv().await;
-    }));
+        println!("r2 got: {:#?}", data);
+        assert_eq!(b"hello", data.unwrap().data.as_ref());
 
-    // -- endpoint 2 -- //
+        // make sure the channel ends
+        while let Some(_) = r2.recv().await {}
+    });
 
-    driver_tasks.push(tokio::task::spawn(driver2));
-    test_tasks.push(tokio::task::spawn(async move {
-        let mut recv2 = recv2;
-        for _ in 0..2 {
-            println!("recv2: {:?}", recv2.recv().await);
-        }
-        ep2_s.send(&mut WakeLater::new(), ());
-        println!("recv2 ending");
-    }));
-    test_tasks.push(tokio::task::spawn(async move {
-        let addr1 = &addr1;
-        for _ in 0..2 {
-            send2
-                .send(OutUdpPacket {
-                    dst_addr: *addr1,
-                    ecn: None,
-                    data: b"world".to_vec(),
-                    segment_size: None,
-                    src_ip: None,
-                })
-                .unwrap();
-        }
-        let _ = ep2_r.recv().await;
-    }));
+    println!("sending");
 
-    // make sure the tests all pass
-    futures::future::try_join_all(test_tasks).await.unwrap();
+    // udp is unreliable, but we should get at least 1 out of 5 : )
+    for _ in 0..5 {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-    // shutdown the endpoints
-    shutdown1();
-    shutdown2();
+        s1.send(OutUdpPacket {
+            dst_addr: addr2,
+            ecn: None,
+            data: b"hello".to_vec(),
+            segment_size: None,
+            src_ip: None,
+        })
+        .await
+        .unwrap();
+    }
 
-    // make sure the endpoint drivers shut down
-    futures::future::try_join_all(driver_tasks).await.unwrap();
+    println!("awaiting recv");
+    or.await.unwrap();
+
+    println!("dropping handles");
+    drop(s1);
+    drop(r1);
+    drop(s2);
+
+    println!("await recv task");
+    tr2.await.unwrap();
+    println!("await d1");
+    t1.await.unwrap();
+    println!("await d2");
+    t2.await.unwrap();
 }
-*/
