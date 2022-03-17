@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
+const BATCH_SIZE: usize = quinn_udp::BATCH_SIZE;
+
 enum DriverCmd {
     LocalAddr(tokio::sync::oneshot::Sender<AqResult<SocketAddr>>),
 }
@@ -81,14 +83,14 @@ impl Driver {
         tokio::sync::mpsc::Sender<OutUdpPacket>,
         tokio::sync::mpsc::Sender<DriverCmd>,
     ) {
-        let mut read_bufs_raw = Vec::with_capacity(quinn_udp::BATCH_SIZE);
-        for _ in 0..quinn_udp::BATCH_SIZE {
+        let mut read_bufs_raw = Vec::with_capacity(BATCH_SIZE);
+        for _ in 0..BATCH_SIZE {
             let mut buf = bytes::BytesMut::with_capacity(max_udp_size);
             buf.resize(max_udp_size, 0);
             read_bufs_raw.push(buf);
         }
 
-        let capacity = quinn_udp::BATCH_SIZE * 4;
+        let capacity = (BATCH_SIZE * 4).max(16).min(64);
         let (in_send, in_recv) = tokio::sync::mpsc::channel(capacity);
         let (packet_send, packet_recv) = tokio::sync::mpsc::channel(capacity);
         let (cmd_send, cmd_recv) = tokio::sync::mpsc::channel(capacity);
@@ -97,9 +99,9 @@ impl Driver {
             Self {
                 state,
                 socket,
-                write_bufs: VecDeque::with_capacity(quinn_udp::BATCH_SIZE),
+                write_bufs: VecDeque::with_capacity(BATCH_SIZE),
                 read_bufs_raw: read_bufs_raw.into_boxed_slice(),
-                read_bufs: VecDeque::with_capacity(quinn_udp::BATCH_SIZE),
+                read_bufs: VecDeque::with_capacity(BATCH_SIZE),
                 in_send,
                 in_send_fut: None,
                 packet_recv,
@@ -173,7 +175,7 @@ impl Driver {
 
         while !write_bufs.is_empty() {
             write_bufs.make_contiguous();
-            let count = std::cmp::min(quinn_udp::BATCH_SIZE, write_bufs.len());
+            let count = std::cmp::min(BATCH_SIZE, write_bufs.len());
 
             match socket.poll_send(
                 state,
@@ -202,7 +204,7 @@ impl Driver {
         &mut self,
         cx: &mut Context<'_>,
     ) -> AqResult<Disposition> {
-        if self.write_bufs.len() == quinn_udp::BATCH_SIZE {
+        if self.write_bufs.len() == BATCH_SIZE {
             // safe to return pending here because we know
             // the sender has already registered a pending
             // so we'll get woken when there's more space
@@ -211,7 +213,7 @@ impl Driver {
 
         let mut did_work = false;
 
-        while self.write_bufs.len() < quinn_udp::BATCH_SIZE {
+        while self.write_bufs.len() < BATCH_SIZE {
             match self.packet_recv.poll_recv(cx) {
                 Poll::Pending => {
                     // since poll_send is called before us, if we did
@@ -406,7 +408,7 @@ impl UdpBackendSender for Sender {
     }
 
     fn batch_size(&self) -> usize {
-        quinn_udp::BATCH_SIZE
+        BATCH_SIZE
     }
 
     fn max_gso_segments(&self) -> usize {

@@ -40,16 +40,27 @@ async fn gen_sock(len: usize) -> Sock {
 async fn send_task(sock: Sock) -> usize {
     let mut send_count = 0;
 
+    let start = std::time::Instant::now();
+
     while sock.get_cont() {
+        // the other side has to do a to_vec... do that here too
+        let data = sock.data.to_vec();
         let wrote = sock
             .sock_send
-            .send_to(&sock.data, &sock.recv_addr)
+            .send_to(&data, &sock.recv_addr)
             .await
             .unwrap();
         assert_eq!(wrote, sock.data.len());
 
         send_count += 1;
+        if send_count % 10 == 0 {
+            tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+        }
         if send_count % 100 == 0 {
+            if start.elapsed().as_secs() >= 5 {
+                println!("send done");
+                break;
+            }
             tokio::task::yield_now().await;
         }
     }
@@ -61,7 +72,10 @@ async fn recv_task(sock: Sock) -> usize {
     let mut buf = vec![0; 64 * 1024];
     let mut recv_count = 0;
 
-    while let Ok((size, _)) = sock.sock_recv.recv_from(&mut buf).await {
+    while let Ok(Ok((size, _))) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        sock.sock_recv.recv_from(&mut buf),
+    ).await {
         let data = &buf[0..size];
         assert_eq!(data, &*sock.data);
 
@@ -81,11 +95,11 @@ async fn recv_task(sock: Sock) -> usize {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     println!("gen_sock");
-    let sock = gen_sock(60 * 1024).await;
+    let sock = gen_sock(20 * 1024).await;
     println!("spawn tasks");
     let ts = tokio::task::spawn(send_task(sock.clone()));
     let tr = tokio::task::spawn(recv_task(sock.clone()));
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     println!("call stop");
     sock.stop();
     println!("await tasks");
