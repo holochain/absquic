@@ -52,9 +52,9 @@ pub struct InUdpPacket {
 }
 
 /// Trait defining an absquic backend udp implementation
-pub trait UdpBackendSender: 'static + Send + Sync {
+pub trait UdpBackendSender: 'static + Send {
     /// Get the local address of this backend udp socket
-    fn local_addr(&self) -> AqBoxFut<'static, AqResult<SocketAddr>>;
+    fn local_addr(&mut self) -> OneShotReceiver<SocketAddr>;
 
     /// Get the recommended batch size for this backend udp socket
     fn batch_size(&self) -> usize;
@@ -64,13 +64,36 @@ pub trait UdpBackendSender: 'static + Send + Sync {
     fn max_gso_segments(&self) -> usize;
 
     /// Send data through this backend udp socket
-    /// (if successfull, the data will be taken from the option)
-    fn send(&self, data: OutUdpPacket) -> AqBoxFut<'static, AqResult<()>>;
+    fn poll_send(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<AqResult<SenderCb<OutUdpPacket>>>;
+}
+
+impl dyn UdpBackendSender + 'static + Send {
+    /// Send data through this backend udp socket
+    pub async fn send(&mut self, data: OutUdpPacket) -> AqResult<()> {
+        struct X<'lt>(&'lt mut (dyn UdpBackendSender + 'static + Send));
+
+        impl<'lt> Future for X<'lt> {
+            type Output = AqResult<SenderCb<OutUdpPacket>>;
+
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Self::Output> {
+                self.0.poll_send(cx)
+            }
+        }
+
+        let cb = X(self).await?;
+        cb(data);
+        Ok(())
+    }
 }
 
 /// trait object udp backend sender
-pub type DynUdpBackendSender =
-    Arc<dyn UdpBackendSender + 'static + Send + Sync>;
+pub type DynUdpBackendSender = Box<dyn UdpBackendSender + 'static + Send>;
 
 /// Trait defining an absquic backend udp implementation
 pub trait UdpBackendReceiver: 'static + Send {
@@ -145,10 +168,6 @@ pub trait BackendDriverFactory: 'static + Send + Sync {
         udp_backend: Arc<dyn UdpBackendFactory>,
     ) -> AqBoxFut<
         'static,
-        AqResult<(
-            InChanSender<EndpointCmd>,
-            OutChanReceiver<EndpointEvt>,
-            BackendDriver,
-        )>,
+        AqResult<(Sender<EndpointCmd>, Receiver<EndpointEvt>, BackendDriver)>,
     >;
 }

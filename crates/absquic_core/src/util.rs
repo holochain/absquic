@@ -1,258 +1,242 @@
 //! absquic_core utility types
 
-use crate::AqResult;
-use std::collections::VecDeque;
+use crate::*;
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
-use std::task::Waker;
 
-/// Util struct to aggregate wakers we want to wake later
-/// usually after a synchronization lock has been released
-/// Dropping this struct will wake all aggregated wakers
-pub struct WakeLater(Vec<Waker>);
+/// One Shot Recv Future
+pub type OneShotFut<T> = AqBoxFut<'static, AqResult<OneShotKind<T>>>;
 
-impl Drop for WakeLater {
-    fn drop(&mut self) {
-        self.wake();
-    }
-}
+/// One Shot Future Output Type
+pub enum OneShotKind<T: 'static + Send> {
+    /// A value was sent from the send side
+    Value(T),
 
-impl Default for WakeLater {
-    fn default() -> Self {
-        WakeLater::new()
-    }
-}
-
-impl WakeLater {
-    /// construct a new WakeLater instance
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    /// push a waker into this instance
-    #[inline(always)]
-    pub fn push(&mut self, waker: Option<Waker>) {
-        if let Some(waker) = waker {
-            self.0.push(waker);
-        }
-    }
-
-    /// wake all wakers aggregated by this instance
-    pub fn wake(&mut self) {
-        for waker in self.0.drain(..) {
-            waker.wake();
-        }
-    }
+    /// A new future to poll was sent from the send side
+    Forward(OneShotFut<T>),
 }
 
 /// Sender side of a one-shot channel
-pub struct OneShotSender<T: 'static + Send>(tokio::sync::oneshot::Sender<T>);
+pub struct OneShotSender<T: 'static + Send> {
+    send: Option<Box<dyn FnOnce(AqResult<OneShotKind<T>>) + 'static + Send>>,
+}
+
+impl<T: 'static + Send> Drop for OneShotSender<T> {
+    fn drop(&mut self) {
+        if let Some(send) = self.send.take() {
+            send(Err("ChannelClosed".into()));
+        }
+    }
+}
 
 impl<T: 'static + Send> OneShotSender<T> {
+    /// construct a new one shot sender from a generic closure
+    pub fn new<F>(f: F) -> Self
+    where
+        F: FnOnce(AqResult<OneShotKind<T>>) + 'static + Send,
+    {
+        Self {
+            send: Some(Box::new(f)),
+        }
+    }
+
     /// send the item to the receiver side of this channel
-    pub fn send(self, t: T) {
-        let _ = self.0.send(t);
+    pub fn send(mut self, r: AqResult<T>) {
+        if let Some(send) = self.send.take() {
+            match r {
+                Err(e) => send(Err(e)),
+                Ok(t) => send(Ok(OneShotKind::Value(t))),
+            }
+        }
+    }
+
+    /// forward a different one shot receiver's result to
+    /// the receiver attached to *this* one shot sender.
+    pub fn forward(mut self, oth: OneShotReceiver<T>) {
+        if let Some(send) = self.send.take() {
+            send(Ok(OneShotKind::Forward(oth.recv)));
+        }
     }
 }
 
 /// Receiver side of a one-shot channel
-pub struct OneShotReceiver<T: 'static + Send>(
-    tokio::sync::oneshot::Receiver<T>,
-);
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct OneShotReceiver<T: 'static + Send> {
+    recv: OneShotFut<T>,
+}
+
+impl<T: 'static + Send> Future for OneShotReceiver<T> {
+    type Output = AqResult<T>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Self::Output> {
+        self.poll_recv(cx)
+    }
+}
 
 impl<T: 'static + Send> OneShotReceiver<T> {
-    /// future-aware poll receive function
-    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        match std::pin::Pin::new(&mut self.0).poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(_)) => Poll::Ready(None),
-            Poll::Ready(Ok(t)) => Poll::Ready(Some(t)),
+    /// construct a new one shot receiver from a generic future
+    pub fn new<F>(f: F) -> Self
+    where
+        F: Future<Output = AqResult<OneShotKind<T>>> + 'static + Send,
+    {
+        Self {
+            recv: Box::pin(f),
         }
     }
 
-    /// receive the item sent by the sender side of this channel
-    pub async fn recv(mut self) -> Option<T> {
-        struct X<'lt, T: 'static + Send>(&'lt mut OneShotReceiver<T>);
+    /// forward the result of this receiver to a different one shot sender
+    pub fn forward(self, oth: OneShotSender<T>) {
+        oth.forward(self)
+    }
 
-        impl<'lt, T: 'static + Send> Future for X<'lt, T> {
-            type Output = Option<T>;
-
-            fn poll(
-                mut self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<Self::Output> {
-                self.0.poll_recv(cx)
+    /// future-aware poll receive function
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<AqResult<T>> {
+        match std::pin::Pin::new(&mut self.recv).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(OneShotKind::Value(t))) => Poll::Ready(Ok(t)),
+            Poll::Ready(Ok(OneShotKind::Forward(fut))) => {
+                self.recv = fut;
+                // this should tail recurse, right?
+                self.poll_recv(cx)
             }
         }
-
-        X(&mut self).await
     }
 }
 
 /// create a one-shot channel sender / receiver pair
 pub fn one_shot_channel<T: 'static + Send>(
 ) -> (OneShotSender<T>, OneShotReceiver<T>) {
-    let (s, r) = tokio::sync::oneshot::channel();
-    (OneShotSender(s), OneShotReceiver(r))
+    let (s, r) = tokio::sync::oneshot::channel::<AqResult<OneShotKind<T>>>();
+    (OneShotSender::new(move |t| {
+        let _ = s.send(t);
+    }), OneShotReceiver::new(async move {
+        match r.await {
+            Err(_) => Err("ChannelClosed".into()),
+            Ok(k) => k,
+        }
+    }))
 }
 
-/// sender side of an out-going data oriented channel
-pub struct OutChanSender<T: 'static + Send> {
-    want_close: atomic::AtomicBool,
-    sender: tokio::sync::mpsc::UnboundedSender<Option<T>>,
+/// sender side of a data channel
+pub struct Sender<T: 'static + Send> {
+    sender: Option<Arc<Mutex<Option<tokio::sync::mpsc::Sender<T>>>>>,
+    fut: Option<AqBoxFut<'static, AqResult<tokio::sync::mpsc::OwnedPermit<T>>>>,
 }
 
-impl<T: 'static + Send> OutChanSender<T> {
-    /// is this channel closed
+/// sender send callback type
+pub type SenderCb<T> = Box<dyn FnOnce(T) + 'static + Send>;
+
+impl<T: 'static + Send> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        Sender {
+            sender: self.sender.clone(),
+            // clone will not have the same place in the send queue
+            fut: None,
+        }
+    }
+}
+
+impl<T: 'static + Send> Sender<T> {
+    fn get_sender(&self) -> AqResult<tokio::sync::mpsc::Sender<T>> {
+        if let Some(inner) = &self.sender {
+            let inner = inner.lock();
+            if let Some(inner) = &*inner {
+                return Ok(inner.clone());
+            }
+        }
+        Err("ChannelClosed".into())
+    }
+
+    /// close this channel from the sender side
+    pub fn close(&mut self) {
+        drop(self.fut.take());
+        if let Some(inner) = &self.sender {
+            drop(inner.lock().take());
+        }
+        drop(self.sender.take());
+    }
+
+    /// check if this channel is closed
     pub fn is_closed(&self) -> bool {
-        if self.want_close.load(atomic::Ordering::SeqCst) {
-            return true;
+        if let Some(inner) = &self.sender {
+            let inner = inner.lock();
+            if let Some(inner) = &*inner {
+                return inner.is_closed();
+            }
         }
-        self.sender.is_closed()
+        true
     }
 
-    /// push data into this channel
-    pub fn push(
-        &self,
-        should_close: &mut bool,
-        data: &mut VecDeque<T>,
-        close: bool,
-    ) {
-        loop {
-            if self.is_closed() {
-                *should_close = true;
-                break;
-            }
+    /// attempt to send data on this channel
+    pub fn poll_send(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<AqResult<SenderCb<T>>> {
+        let mut fut = if let Some(fut) = self.fut.take() {
+            fut
+        } else {
+            let sender = match self.get_sender() {
+                Err(e) => return Poll::Ready(Err(e)),
+                Ok(sender) => sender,
+            };
 
-            if data.is_empty() {
-                break;
-            }
+            let fut = sender.reserve_owned();
+            Box::pin(async move {
+                fut.await.map_err(|_| one_err::OneErr::new("ChannelClosed"))
+            })
+        };
 
-            if let Err(_) = self.sender.send(Some(data.pop_front().unwrap())) {
-                *should_close = true;
-                break;
+        match std::pin::Pin::new(&mut fut).poll(cx) {
+            Poll::Pending => {
+                self.fut = Some(fut);
+                return Poll::Pending;
             }
-        }
-
-        if close || *should_close {
-            self.want_close.store(true, atomic::Ordering::SeqCst);
-            let _ = self.sender.send(None);
-            *should_close = true;
-        }
-    }
-}
-
-/// receiver side of an out-going data oriented channel
-pub struct OutChanReceiver<T: 'static + Send> {
-    receiver: Option<tokio::sync::mpsc::UnboundedReceiver<Option<T>>>,
-}
-
-impl<T: 'static + Send> OutChanReceiver<T> {
-    /// Receive data sent by the sender on this channel
-    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        if self.receiver.is_none() {
-            return Poll::Ready(None);
-        }
-        match self.receiver.as_mut().unwrap().poll_recv(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(Some(t))) => {
-                // the stream sent a value
-                Poll::Ready(Some(t))
-            }
-            Poll::Ready(None) => {
-                // the stream properly ended
-                drop(self.receiver.take());
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(None)) => {
-                // the stream sent a close signal
-                drop(self.receiver.take());
-                Poll::Ready(None)
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(permit)) => {
+                let cb: SenderCb<T> = Box::new(move |t| {
+                    let _ = permit.send(t);
+                });
+                return Poll::Ready(Ok(cb));
             }
         }
     }
 
-    /// receive data sent by the sender on this channel
-    pub async fn recv(&mut self) -> Option<T> {
-        struct X<'lt, T: 'static + Send>(&'lt mut OutChanReceiver<T>);
+    /// attempt to send data on this channel
+    pub async fn send(&mut self, t: T) -> AqResult<()> {
+        struct X<'lt, T: 'static + Send>(&'lt mut Sender<T>);
 
         impl<'lt, T: 'static + Send> Future for X<'lt, T> {
-            type Output = Option<T>;
+            type Output = AqResult<SenderCb<T>>;
 
             fn poll(
                 mut self: Pin<&mut Self>,
                 cx: &mut Context<'_>,
             ) -> Poll<Self::Output> {
-                self.0.poll_recv(cx)
+                self.0.poll_send(cx)
             }
         }
 
-        X(self).await
-    }
-}
-
-/// create a new out-going data oriented channel pair
-pub fn out_chan<T: 'static + Send>() -> (OutChanSender<T>, OutChanReceiver<T>) {
-    let (s, r) = tokio::sync::mpsc::unbounded_channel();
-    let s = OutChanSender {
-        want_close: atomic::AtomicBool::new(false),
-        sender: s,
-    };
-    let r = OutChanReceiver { receiver: Some(r) };
-    (s, r)
-}
-
-/// sender side of an incoming data channel
-pub struct InChanSender<T: 'static + Send> {
-    sender: tokio::sync::mpsc::Sender<T>,
-}
-
-impl<T: 'static + Send> Clone for InChanSender<T> {
-    fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-        }
-    }
-}
-
-impl<T: 'static + Send> InChanSender<T> {
-    /// send data into the channel
-    pub async fn send(&self, t: T) -> AqResult<()> {
-        self.sender
-            .send(t)
-            .await
-            .map_err(|_| "ChannelClosed".into())
-    }
-
-    /*
-    /// send data into the channel
-    pub fn send(&self, t: T) -> AqResult<()> {
-        if let Some(wake_on_send) = {
-            let mut inner = self.0.lock();
-            if inner.closed {
-                return Err("ChannelClosed".into());
-            } else {
-                inner.buffer.push_back(t);
-            }
-            inner.wake_on_send.take()
-        } {
-            wake_on_send.wake();
-        }
+        let cb = X(self).await?;
+        cb(t);
         Ok(())
     }
-    */
 }
 
-/// receiver side of an incoming data channel
-pub struct InChanReceiver<T: 'static + Send> {
+/// receiver side of a data channel
+pub struct Receiver<T: 'static + Send> {
     receiver: Option<tokio::sync::mpsc::Receiver<T>>,
 }
 
-impl<T: 'static + Send> InChanReceiver<T> {
-    /// receive data from the channel
+impl<T: 'static + Send> Receiver<T> {
+    /// receive data from this channel
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         if let Some(r) = &mut self.receiver {
             r.poll_recv(cx)
@@ -261,9 +245,9 @@ impl<T: 'static + Send> InChanReceiver<T> {
         }
     }
 
-    /// receive data from the channel
+    /// receive data from this channel
     pub async fn recv(&mut self) -> Option<T> {
-        struct X<'lt, T: 'static + Send>(&'lt mut InChanReceiver<T>);
+        struct X<'lt, T: 'static + Send>(&'lt mut Receiver<T>);
 
         impl<'lt, T: 'static + Send> Future for X<'lt, T> {
             type Output = Option<T>;
@@ -280,188 +264,13 @@ impl<T: 'static + Send> InChanReceiver<T> {
     }
 }
 
-/// create a new incoming data oriented channel pair
-pub fn in_chan<T: 'static + Send>(
-    limit: usize,
-) -> (InChanSender<T>, InChanReceiver<T>) {
-    let (s, r) = tokio::sync::mpsc::channel(limit);
-    let s = InChanSender { sender: s };
-    let r = InChanReceiver { receiver: Some(r) };
+/// create a new data channel sender receiver pair
+pub fn channel<T: 'static + Send>(bound: usize) -> (Sender<T>, Receiver<T>) {
+    let (s, r) = tokio::sync::mpsc::channel(bound);
+    let s = Sender {
+        sender: Some(Arc::new(Mutex::new(Some(s)))),
+        fut: None,
+    };
+    let r = Receiver { receiver: Some(r) };
     (s, r)
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use futures::future::FutureExt;
-    //use parking_lot::Mutex;
-    //use std::sync::Arc;
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_one_shot() {
-        let mut all = Vec::with_capacity(40);
-
-        for _ in 0..10 {
-            let (s, r) = one_shot_channel();
-            all.push(
-                async move {
-                    s.send(());
-                }
-                .boxed(),
-            );
-            all.push(
-                async move {
-                    let _ = r.recv().await;
-                }
-                .boxed(),
-            );
-        }
-
-        for _ in 0..10 {
-            let (s, r) = one_shot_channel();
-            all.push(
-                async move {
-                    let _ = tokio::task::spawn(async move {
-                        s.send(());
-                    })
-                    .await;
-                }
-                .boxed(),
-            );
-            all.push(
-                async move {
-                    let _ = tokio::task::spawn(async move {
-                        let _ = r.recv().await;
-                    })
-                    .await;
-                }
-                .boxed(),
-            );
-        }
-
-        futures::future::join_all(all).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_out_chan_send_drop_close() {
-        let (s, mut r) = out_chan::<()>();
-        let task = tokio::task::spawn(async move {
-            assert!(matches!(r.recv().await, None));
-        });
-        drop(s);
-        task.await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_out_chan_send_explicit_close() {
-        let (s, mut r) = out_chan::<()>();
-        let task = tokio::task::spawn(async move {
-            assert!(matches!(r.recv().await, None));
-        });
-        let mut should_close = false;
-        let mut out = VecDeque::new();
-        s.push(&mut should_close, &mut out, true);
-        assert!(should_close);
-        task.await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_out_chan_recv_close() {
-        let (s, r) = out_chan::<()>();
-        drop(r);
-        let mut should_close = false;
-        let mut out = VecDeque::new();
-        out.push_back(());
-        s.push(&mut should_close, &mut out, false);
-        assert!(should_close);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_out_chan_some() {
-        let (s, mut r) = out_chan::<()>();
-        let task = tokio::task::spawn(async move {
-            assert!(matches!(r.recv().await, Some(())));
-            assert!(matches!(r.recv().await, Some(())));
-            assert!(matches!(r.recv().await, None));
-        });
-        let mut should_close = false;
-        let mut out = VecDeque::new();
-        out.push_back(());
-        out.push_back(());
-        s.push(&mut should_close, &mut out, false);
-        drop(s);
-        task.await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_in_chan_recv_drop() {
-        let (s, r) = in_chan::<()>(32);
-        drop(r);
-        assert!(s.send(()).await.is_err());
-    }
-
-    /*
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_in_chan_send_drop() {
-        let (s, r) = in_chan::<()>(32);
-        drop(s);
-        let mut should_close = false;
-        let mut buf = VecDeque::new();
-        r.recv();
-        assert!(should_close);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_in_chan_wake() {
-        struct X(InChanReceiver<()>);
-
-        impl Future for X {
-            type Output = ();
-
-            fn poll(
-                self: std::pin::Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<Self::Output> {
-                let mut should_close = false;
-                let mut buf = VecDeque::new();
-                self.0.recv(&mut should_close, &mut buf, false);
-                if buf.is_empty() {
-                    self.0.register_wake_on_send(cx.waker().clone());
-                    Poll::Pending
-                } else {
-                    Poll::Ready(())
-                }
-            }
-        }
-
-        struct W(Mutex<usize>);
-
-        impl futures::task::ArcWake for W {
-            fn wake_by_ref(arc_self: &Arc<Self>) {
-                *arc_self.0.lock() += 1;
-            }
-        }
-
-        let waker_inner = Arc::new(W(Mutex::new(0)));
-
-        let waker = futures::task::waker(waker_inner.clone());
-        let mut cx = Context::from_waker(&waker);
-
-        let (s, r) = in_chan::<()>(32);
-
-        let mut x = X(r);
-        assert!(matches!(
-            std::pin::Pin::new(&mut x).poll(&mut cx),
-            Poll::Pending
-        ));
-        assert_eq!(0, *waker_inner.0.lock());
-
-        s.send(()).unwrap();
-        assert_eq!(1, *waker_inner.0.lock());
-        assert!(matches!(
-            std::pin::Pin::new(&mut x).poll(&mut cx),
-            Poll::Ready(())
-        ));
-    }
-    */
 }

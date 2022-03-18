@@ -5,6 +5,7 @@
 
 use absquic_core::backend::*;
 use absquic_core::deps::{bytes, one_err};
+use absquic_core::util::*;
 use absquic_core::*;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -16,7 +17,7 @@ use std::task::Poll;
 const BATCH_SIZE: usize = quinn_udp::BATCH_SIZE;
 
 enum DriverCmd {
-    LocalAddr(tokio::sync::oneshot::Sender<AqResult<SocketAddr>>),
+    LocalAddr(util::OneShotSender<SocketAddr>),
 }
 
 #[derive(Clone, Copy)]
@@ -40,8 +41,6 @@ impl Disposition {
     }
 }
 
-type InSendCb = Box<dyn FnOnce(InUdpPacket) + 'static + Send>;
-
 #[allow(dead_code)]
 struct Driver {
     state: Arc<quinn_udp::UdpState>,
@@ -49,10 +48,9 @@ struct Driver {
     write_bufs: VecDeque<quinn_proto::Transmit>,
     read_bufs_raw: Box<[bytes::BytesMut]>,
     read_bufs: VecDeque<InUdpPacket>,
-    in_send: tokio::sync::mpsc::Sender<InUdpPacket>,
-    in_send_fut: Option<AqBoxFut<'static, AqResult<InSendCb>>>,
-    packet_recv: tokio::sync::mpsc::Receiver<OutUdpPacket>,
-    cmd_recv: tokio::sync::mpsc::Receiver<DriverCmd>,
+    in_send: util::Sender<InUdpPacket>,
+    packet_recv: util::Receiver<OutUdpPacket>,
+    cmd_recv: util::Receiver<DriverCmd>,
 }
 
 impl Future for Driver {
@@ -79,9 +77,9 @@ impl Driver {
         socket: quinn_udp::UdpSocket,
     ) -> (
         Self,
-        tokio::sync::mpsc::Receiver<InUdpPacket>,
-        tokio::sync::mpsc::Sender<OutUdpPacket>,
-        tokio::sync::mpsc::Sender<DriverCmd>,
+        util::Receiver<InUdpPacket>,
+        util::Sender<OutUdpPacket>,
+        util::Sender<DriverCmd>,
     ) {
         let mut read_bufs_raw = Vec::with_capacity(BATCH_SIZE);
         for _ in 0..BATCH_SIZE {
@@ -91,9 +89,9 @@ impl Driver {
         }
 
         let capacity = (BATCH_SIZE * 4).max(16).min(64);
-        let (in_send, in_recv) = tokio::sync::mpsc::channel(capacity);
-        let (packet_send, packet_recv) = tokio::sync::mpsc::channel(capacity);
-        let (cmd_send, cmd_recv) = tokio::sync::mpsc::channel(capacity);
+        let (in_send, in_recv) = util::channel(capacity);
+        let (packet_send, packet_recv) = util::channel(capacity);
+        let (cmd_send, cmd_recv) = util::channel(capacity);
 
         (
             Self {
@@ -103,7 +101,6 @@ impl Driver {
                 read_bufs_raw: read_bufs_raw.into_boxed_slice(),
                 read_bufs: VecDeque::with_capacity(BATCH_SIZE),
                 in_send,
-                in_send_fut: None,
                 packet_recv,
                 cmd_recv,
             },
@@ -332,54 +329,19 @@ impl Driver {
         }
 
         while !self.read_bufs.is_empty() {
-            // see if we have a permit future still dangling
-            if let Some(send_cb) = {
-                if let Some(mut fut) = self.in_send_fut.take() {
-                    match std::pin::Pin::new(&mut fut).poll(cx) {
-                        Poll::Pending => {
-                            // even if we cleared *some* of the items
-                            // from this list, we don't need to re-run
-                            // poll_recv until read_bufs is all the way empty
-                            // so it's okay to return PendOk here
-                            self.in_send_fut = Some(fut);
-                            return Ok(Disposition::PendOk);
-                        }
-                        Poll::Ready(Err(e)) => return Err(e),
-                        Poll::Ready(Ok(send_cb)) => Some(send_cb),
-                    }
-                } else {
-                    None
+            match self.in_send.poll_send(cx) {
+                Poll::Pending => {
+                    // even if we cleared *some* of the items
+                    // from this list, we don't need to re-run
+                    // poll_recv until read_bufs is all the way empty
+                    // so it's okay to return PendOk here
+                    return Ok(Disposition::PendOk);
                 }
-            } {
-                send_cb(self.read_bufs.pop_front().unwrap());
-            }
-
-            // optimization, use the try reserve
-            while !self.read_bufs.is_empty() {
-                if let Ok(permit) = self.in_send.try_reserve() {
-                    permit.send(self.read_bufs.pop_front().unwrap());
-                } else {
-                    break;
+                Poll::Ready(Err(e)) => return Err(e),
+                Poll::Ready(Ok(send_cb)) => {
+                    send_cb(self.read_bufs.pop_front().unwrap());
                 }
             }
-
-            if self.read_bufs.is_empty() {
-                // poll again to see if there's more incoming data
-                return Ok(Disposition::MoreWork);
-            }
-
-            // try_reserve either errored or had no permits,
-            // let's try the future route
-            let fut = self.in_send.clone().reserve_owned();
-            self.in_send_fut = Some(Box::pin(async move {
-                let permit = fut
-                    .await
-                    .map_err(|e| one_err::OneErr::new(format!("{:?}", e)))?;
-                let cb: InSendCb = Box::new(move |t| {
-                    let _ = permit.send(t);
-                });
-                Ok(cb)
-            }));
         }
 
         // we cleared our outgoing buffer and didn't register a waker
@@ -390,20 +352,20 @@ impl Driver {
 
 struct Sender {
     state: Arc<quinn_udp::UdpState>,
-    packet_send: tokio::sync::mpsc::Sender<OutUdpPacket>,
-    cmd_send: tokio::sync::mpsc::Sender<DriverCmd>,
+    packet_send: util::Sender<OutUdpPacket>,
+    cmd_send: util::Sender<DriverCmd>,
 }
 
 impl UdpBackendSender for Sender {
-    fn local_addr(&self) -> AqBoxFut<'static, AqResult<SocketAddr>> {
-        let sender = self.cmd_send.clone();
-        Box::pin(async move {
-            let (s, r) = tokio::sync::oneshot::channel();
+    fn local_addr(&mut self) -> OneShotReceiver<SocketAddr> {
+        let mut sender = self.cmd_send.clone();
+        OneShotReceiver::new(async move {
+            let (s, r) = util::one_shot_channel();
             sender
                 .send(DriverCmd::LocalAddr(s))
                 .await
                 .map_err(|_| one_err::OneErr::new("SocketClosed"))?;
-            r.await.map_err(|_| one_err::OneErr::new("SocketClosed"))?
+            Ok(OneShotKind::Value(r.await?))
         })
     }
 
@@ -415,16 +377,16 @@ impl UdpBackendSender for Sender {
         self.state.max_gso_segments()
     }
 
-    fn send(&self, data: OutUdpPacket) -> AqBoxFut<'static, AqResult<()>> {
-        let sender = self.packet_send.clone();
-        Box::pin(async move {
-            sender.send(data).await.map_err(|_| "SocketClosed".into())
-        })
+    fn poll_send(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<AqResult<SenderCb<OutUdpPacket>>> {
+        self.packet_send.poll_send(cx)
     }
 }
 
 struct Receiver {
-    receiver: tokio::sync::mpsc::Receiver<InUdpPacket>,
+    receiver: util::Receiver<InUdpPacket>,
 }
 
 impl UdpBackendReceiver for Receiver {
@@ -475,7 +437,7 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
                 cmd_send,
             };
 
-            let sender: DynUdpBackendSender = Arc::new(sender);
+            let sender: DynUdpBackendSender = Box::new(sender);
 
             let receiver = Receiver { receiver: in_recv };
 

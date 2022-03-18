@@ -4,10 +4,10 @@ use crate::*;
 async fn test_udp() {
     let factory = QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
 
-    let (s1, r1, d1) = factory.bind().await.unwrap();
+    let (mut s1, r1, d1) = factory.bind().await.unwrap();
     let t1 = tokio::task::spawn(d1);
 
-    let (s2, mut r2, d2) = factory.bind().await.unwrap();
+    let (mut s2, mut r2, d2) = factory.bind().await.unwrap();
     let t2 = tokio::task::spawn(d2);
 
     let addr2 = s2.local_addr().await.unwrap();

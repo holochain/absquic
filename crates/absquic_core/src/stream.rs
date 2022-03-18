@@ -1,18 +1,50 @@
 //! absquic_core stream types
 
-use crate::util::*;
 use crate::AqResult;
+use std::task::Context;
+use std::task::Poll;
+/*
+use crate::util::*;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::task::Context;
-use std::task::Poll;
 use std::task::Waker;
+*/
 
 /// types only relevant when implementing a quic state machine backend
 pub mod backend {
     use super::*;
 
+    /// the max length of a bytes authorized for a ReadStreamBackend push
+    pub type ReadMaxSize = usize;
+
+    /// a callback allowing data to be pushed into a ReadStreamBackend
+    pub type ReadCb = Box<dyn FnOnce(bytes::Bytes) + 'static + Send>;
+
+    /// the backend of a read stream, allows publish data to the api user
+    pub struct ReadStreamBackend {}
+
+    impl ReadStreamBackend {
+        /// request to push data into the read stream
+        pub fn poll_request_push(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<AqResult<(ReadMaxSize, ReadCb)>> {
+            todo!()
+        }
+
+        /// request to push data into the read stream
+        pub async fn request_push(
+            &mut self,
+        ) -> AqResult<(ReadMaxSize, ReadCb)> {
+            todo!()
+        }
+    }
+
+    /// the backend of a write stream, allows collecting the written data
+    pub struct WriteStreamBackend {}
+
+    /*
     pub(crate) struct ReadStreamInner {
         pub(crate) closed: bool,
         pub(crate) read_waker: Option<Waker>,
@@ -130,10 +162,94 @@ pub mod backend {
             }
         }
     }
+    */
 }
 
-use backend::*;
+//use backend::*;
 
+/// Quic Read Stream
+pub struct ReadStream {}
+
+impl ReadStream {
+    /// read a chunk of data from the stream
+    pub fn poll_read_chunk(
+        &mut self,
+        _cx: Context<'_>,
+        _max_bytes: usize,
+    ) -> Poll<Option<bytes::Bytes>> {
+        todo!()
+    }
+
+    /// read a chunk of data from the stream
+    pub async fn read_chunk(
+        &mut self,
+        _max_bytes: usize,
+    ) -> Option<bytes::Bytes> {
+        todo!()
+    }
+
+    /// cancel the stream with given error code
+    pub fn poll_stop(
+        &mut self,
+        _cx: Context<'_>,
+        _error_code: u64,
+    ) -> Poll<AqResult<()>> {
+        todo!()
+    }
+
+    /// cancel the stream with given error code
+    pub async fn stop(&mut self, _error_code: u64) -> AqResult<()> {
+        todo!()
+    }
+}
+
+/// Quic Write Stream
+pub struct WriteStream {}
+
+impl WriteStream {
+    /// write data to the stream
+    pub fn poll_write_chunk(
+        &mut self,
+        _cx: Context<'_>,
+        _chunks: &mut bytes::Bytes,
+    ) -> Poll<AqResult<()>> {
+        todo!()
+    }
+
+    /// write data to the stream
+    pub async fn write_chunk(
+        &mut self,
+        _chunks: &mut bytes::Bytes,
+    ) -> AqResult<()> {
+        todo!()
+    }
+
+    /// gracefully shutdown the write stream
+    pub fn poll_finish(&mut self, _cx: Context<'_>) -> Poll<AqResult<()>> {
+        todo!()
+    }
+
+    /// gracefully shutdown the write stream
+    pub async fn finish(&mut self) -> AqResult<()> {
+        todo!()
+    }
+
+    /// shutdown the write stream immediately
+    pub fn poll_reset(
+        &mut self,
+        _cx: Context<'_>,
+        _error_code: u64,
+    ) -> Poll<AqResult<()>> {
+        todo!()
+    }
+
+    /// shutdown the write stream immediately
+    pub async fn reset(&mut self, _error_code: u64) -> AqResult<()> {
+        todo!()
+    }
+}
+
+/*
 /// Quic Read Stream
 pub struct ReadStream(ReadStreamCore);
 
@@ -236,3 +352,4 @@ impl WriteStream {
         self.poll_flush_or_shutdown(cx, true)
     }
 }
+*/

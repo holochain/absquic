@@ -20,8 +20,8 @@ pub mod backend {
 
     /// as a backend library, construct an absquic connection instance
     pub fn construct_connection(
-        command_sender: InChanSender<ConnectionCmd>,
-        event_receiver: OutChanReceiver<ConnectionEvt>,
+        command_sender: Sender<ConnectionCmd>,
+        event_receiver: Receiver<ConnectionEvt>,
     ) -> (Connection, ConnectionRecv) {
         (Connection(command_sender), event_receiver)
     }
@@ -51,9 +51,9 @@ pub enum ConnectionEvt {
 }
 
 /// Receive events related to a specific quic connection instance
-pub type ConnectionRecv = OutChanReceiver<ConnectionEvt>;
+pub type ConnectionRecv = Receiver<ConnectionEvt>;
 
-impl OutChanReceiver<ConnectionEvt> {
+impl Receiver<ConnectionEvt> {
     /// Wait for this connection to be connected
     pub async fn wait_connected(mut self) -> AqResult<Self> {
         while let Some(evt) = self.recv().await {
@@ -71,24 +71,20 @@ impl OutChanReceiver<ConnectionEvt> {
 
 /// A handle to a quic connection
 #[derive(Clone)]
-pub struct Connection(InChanSender<ConnectionCmd>);
+pub struct Connection(Sender<ConnectionCmd>);
 
 impl Connection {
     /// the current address associated with the remote side of this connection
-    pub async fn remote_address(&self) -> AqResult<SocketAddr> {
+    pub async fn remote_address(&mut self) -> AqResult<SocketAddr> {
         let (s, r) = one_shot_channel();
         self.0.send(ConnectionCmd::GetRemoteAddress(s)).await?;
-        r.recv()
-            .await
-            .ok_or_else(|| one_err::OneErr::new("ConnectionClosed"))?
+        r.await?
     }
 
     /// open a new outgoing uni-directional stream
-    pub async fn open_uni_stream(&self) -> AqResult<WriteStream> {
+    pub async fn open_uni_stream(&mut self) -> AqResult<WriteStream> {
         let (s, r) = one_shot_channel();
         self.0.send(ConnectionCmd::OpenUniStream(s)).await?;
-        r.recv()
-            .await
-            .ok_or_else(|| one_err::OneErr::new("ConnectionClosed"))?
+        r.await?
     }
 }

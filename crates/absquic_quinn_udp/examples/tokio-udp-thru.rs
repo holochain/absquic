@@ -75,7 +75,9 @@ async fn recv_task(sock: Sock) -> usize {
     while let Ok(Ok((size, _))) = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         sock.sock_recv.recv_from(&mut buf),
-    ).await {
+    )
+    .await
+    {
         let data = &buf[0..size];
         assert_eq!(data, &*sock.data);
 

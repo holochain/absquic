@@ -4,3 +4,6 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
+absquic_core = { version = "0.0.1", path = "../absquic_core" }
+quinn-proto = { version = "0.8.1", default-features = false }
+tracing = { version = "0.1.32" }
