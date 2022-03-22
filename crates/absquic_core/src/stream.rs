@@ -1,19 +1,81 @@
 //! absquic_core stream types
 
 use crate::AqResult;
+use std::sync::atomic;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
-/*
-use crate::util::*;
-use parking_lot::Mutex;
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::task::Waker;
-*/
 
 /// types only relevant when implementing a quic state machine backend
 pub mod backend {
     use super::*;
+
+    struct CounterInner {
+        max: usize,
+        counter: atomic::AtomicUsize,
+        waker: parking_lot::Mutex<Option<std::task::Waker>>,
+    }
+
+    impl CounterInner {
+        fn wake(&self) {
+            if let Some(waker) = self.waker.lock().take() {
+                waker.wake();
+            }
+        }
+    }
+
+    struct Counter(Arc<CounterInner>);
+
+    impl Counter {
+        fn new(max: usize) -> Self {
+            Self(Arc::new(CounterInner {
+                max,
+                counter: atomic::AtomicUsize::new(0),
+                waker: parking_lot::Mutex::new(None),
+            }))
+        }
+
+        fn reserve(&self, cx: &mut Context<'_>) -> Option<CounterAddPermit> {
+            let cur = self.0.counter.swap(self.0.max, atomic::Ordering::AcqRel);
+            if cur >= self.0.max {
+                *self.0.waker.lock() = Some(cx.waker().clone());
+                None
+            } else {
+                let amount = self.0.max - cur;
+                Some(CounterAddPermit(self.0.clone(), amount))
+            }
+        }
+    }
+
+    pub(crate) struct CounterAddPermit(Arc<CounterInner>, usize);
+
+    impl Drop for CounterAddPermit {
+        fn drop(&mut self) {
+            self.0.counter.fetch_sub(self.1, atomic::Ordering::AcqRel);
+            self.0.wake();
+        }
+    }
+
+    impl CounterAddPermit {
+        fn len(&self) -> usize {
+            self.1
+        }
+
+        fn downgrade_to(&mut self, new_amount: usize) {
+            if new_amount == self.1 {
+                return;
+            }
+
+            if new_amount < 1 || new_amount > self.1 {
+                panic!("invalid target amount");
+            }
+
+            let sub = self.1 - new_amount;
+            self.1 = new_amount;
+            self.0.counter.fetch_sub(sub, atomic::Ordering::AcqRel);
+            self.0.wake();
+        }
+    }
 
     /// the max length of a bytes authorized for a ReadStreamBackend push
     pub type ReadMaxSize = usize;
@@ -22,27 +84,54 @@ pub mod backend {
     pub type ReadCb = Box<dyn FnOnce(bytes::Bytes) + 'static + Send>;
 
     /// the backend of a read stream, allows publish data to the api user
-    pub struct ReadStreamBackend {}
+    pub struct ReadStreamBackend {
+        counter: Counter,
+        send: tokio::sync::mpsc::UnboundedSender<(
+            bytes::Bytes,
+            CounterAddPermit,
+        )>,
+    }
 
     impl ReadStreamBackend {
         /// request to push data into the read stream
         pub fn poll_request_push(
             &mut self,
-            _cx: &mut Context<'_>,
+            cx: &mut Context<'_>,
         ) -> Poll<AqResult<(ReadMaxSize, ReadCb)>> {
-            todo!()
+            if let Some(mut permit) = self.counter.reserve(cx) {
+                let sender = self.send.clone();
+                let max_size = permit.len();
+                let read_cb: ReadCb = Box::new(move |mut b| {
+                    if b.len() > max_size {
+                        b = b.split_to(max_size);
+                    } else if b.len() < max_size {
+                        permit.downgrade_to(b.len());
+                    }
+                    let _ = sender.send((b, permit));
+                });
+                Poll::Ready(Ok((max_size, read_cb)))
+            } else {
+                Poll::Pending
+            }
         }
+    }
 
-        /// request to push data into the read stream
-        pub async fn request_push(
-            &mut self,
-        ) -> AqResult<(ReadMaxSize, ReadCb)> {
-            todo!()
-        }
+    /// construct a new read stream backend and frontend pair
+    pub fn read_stream_pair(
+        buf_size: usize,
+    ) -> (ReadStreamBackend, ReadStream) {
+        let counter = Counter::new(buf_size);
+        let (send, recv) = tokio::sync::mpsc::unbounded_channel();
+        (ReadStreamBackend { counter, send }, ReadStream { recv, buf: None })
     }
 
     /// the backend of a write stream, allows collecting the written data
     pub struct WriteStreamBackend {}
+
+    /// construct a new write stream backend and frontend pair
+    pub fn write_stream_pair() -> (WriteStreamBackend, WriteStream) {
+        (WriteStreamBackend {}, WriteStream {})
+    }
 
     /*
     pub(crate) struct ReadStreamInner {
@@ -165,19 +254,43 @@ pub mod backend {
     */
 }
 
-//use backend::*;
+use backend::*;
 
 /// Quic Read Stream
-pub struct ReadStream {}
+pub struct ReadStream {
+    recv:
+        tokio::sync::mpsc::UnboundedReceiver<(bytes::Bytes, CounterAddPermit)>,
+    buf: Option<bytes::Bytes>,
+}
 
 impl ReadStream {
     /// read a chunk of data from the stream
     pub fn poll_read_chunk(
         &mut self,
-        _cx: Context<'_>,
-        _max_bytes: usize,
+        cx: &mut Context<'_>,
+        max_bytes: usize,
     ) -> Poll<Option<bytes::Bytes>> {
-        todo!()
+        if max_bytes == 0 {
+            return Poll::Ready(Some(vec![].into()));
+        }
+
+        if self.buf.is_none() {
+            match self.recv.poll_recv(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some((b, _))) => self.buf = Some(b),
+            }
+        }
+
+        let mut b = self.buf.take().unwrap();
+
+        if b.len() <= max_bytes {
+            Poll::Ready(Some(b))
+        } else {
+            let out = b.split_to(max_bytes);
+            self.buf = Some(b);
+            Poll::Ready(Some(out))
+        }
     }
 
     /// read a chunk of data from the stream
@@ -188,6 +301,7 @@ impl ReadStream {
         todo!()
     }
 
+    /*
     /// cancel the stream with given error code
     pub fn poll_stop(
         &mut self,
@@ -201,6 +315,7 @@ impl ReadStream {
     pub async fn stop(&mut self, _error_code: u64) -> AqResult<()> {
         todo!()
     }
+    */
 }
 
 /// Quic Write Stream

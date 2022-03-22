@@ -32,6 +32,18 @@ pub mod backend {
 
 use backend::*;
 
+/// helper logic to plug in periodic scheduling into arbitrary runtime
+pub trait TimeoutsScheduler: 'static + Send {
+    /// schedule logic to be invoked at instant
+    /// if previous logic has been scheduled but not yet triggered,
+    /// it is okay to drop that previous logic without triggering.
+    fn schedule(
+        &mut self,
+        logic: Box<dyn FnOnce() + 'static + Send>,
+        at: std::time::Instant,
+    );
+}
+
 /// events related to a quic endpoint
 pub enum EndpointEvt {
     /// endpoint error, the endpoint will no longer function
@@ -50,17 +62,22 @@ pub struct Endpoint(Sender<EndpointCmd>);
 
 impl Endpoint {
     /// construct a new endpoint
-    pub async fn new<U, D>(
+    pub async fn new<U, D, S>(
         udp_backend: U,
         backend_driver: D,
+        timeouts_scheduler: S,
     ) -> AqResult<(Endpoint, EndpointRecv, BackendDriver)>
     where
         U: UdpBackendFactory,
         D: BackendDriverFactory,
+        S: TimeoutsScheduler,
     {
         let udp_backend: Arc<dyn UdpBackendFactory> = Arc::new(udp_backend);
-        let (cmd_send, evt_recv, driver) =
-            backend_driver.construct_endpoint(udp_backend).await?;
+        let timeouts_scheduler: Box<dyn TimeoutsScheduler> =
+            Box::new(timeouts_scheduler);
+        let (cmd_send, evt_recv, driver) = backend_driver
+            .construct_endpoint(udp_backend, timeouts_scheduler)
+            .await?;
         Ok((Endpoint(cmd_send), evt_recv, driver))
     }
 

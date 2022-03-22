@@ -12,10 +12,13 @@ pub mod backend {
     /// send a control command to the connection backend implementation
     pub enum ConnectionCmd {
         /// get the remote address of this connection
-        GetRemoteAddress(OneShotSender<AqResult<SocketAddr>>),
+        GetRemoteAddress(OneShotSender<SocketAddr>),
 
         /// open a new outgoing uni-directional stream
-        OpenUniStream(OneShotSender<AqResult<WriteStream>>),
+        OpenUniStream(OneShotSender<WriteStream>),
+
+        /// open a new outgoing bi-directional stream
+        OpenBiStream(OneShotSender<(WriteStream, ReadStream)>),
     }
 
     /// as a backend library, construct an absquic connection instance
@@ -70,7 +73,6 @@ impl Receiver<ConnectionEvt> {
 }
 
 /// A handle to a quic connection
-#[derive(Clone)]
 pub struct Connection(Sender<ConnectionCmd>);
 
 impl Connection {
@@ -78,13 +80,22 @@ impl Connection {
     pub async fn remote_address(&mut self) -> AqResult<SocketAddr> {
         let (s, r) = one_shot_channel();
         self.0.send(ConnectionCmd::GetRemoteAddress(s)).await?;
-        r.await?
+        r.await
     }
 
     /// open a new outgoing uni-directional stream
     pub async fn open_uni_stream(&mut self) -> AqResult<WriteStream> {
         let (s, r) = one_shot_channel();
         self.0.send(ConnectionCmd::OpenUniStream(s)).await?;
-        r.await?
+        r.await
+    }
+
+    /// open a new outgoing bi-directional stream
+    pub async fn open_bi_stream(
+        &mut self,
+    ) -> AqResult<(WriteStream, ReadStream)> {
+        let (s, r) = one_shot_channel();
+        self.0.send(ConnectionCmd::OpenBiStream(s)).await?;
+        r.await
     }
 }

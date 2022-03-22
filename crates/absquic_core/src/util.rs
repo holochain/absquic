@@ -86,9 +86,7 @@ impl<T: 'static + Send> OneShotReceiver<T> {
     where
         F: Future<Output = AqResult<OneShotKind<T>>> + 'static + Send,
     {
-        Self {
-            recv: Box::pin(f),
-        }
+        Self { recv: Box::pin(f) }
     }
 
     /// forward the result of this receiver to a different one shot sender
@@ -115,14 +113,17 @@ impl<T: 'static + Send> OneShotReceiver<T> {
 pub fn one_shot_channel<T: 'static + Send>(
 ) -> (OneShotSender<T>, OneShotReceiver<T>) {
     let (s, r) = tokio::sync::oneshot::channel::<AqResult<OneShotKind<T>>>();
-    (OneShotSender::new(move |t| {
-        let _ = s.send(t);
-    }), OneShotReceiver::new(async move {
-        match r.await {
-            Err(_) => Err("ChannelClosed".into()),
-            Ok(k) => k,
-        }
-    }))
+    (
+        OneShotSender::new(move |t| {
+            let _ = s.send(t);
+        }),
+        OneShotReceiver::new(async move {
+            match r.await {
+                Err(_) => Err("ChannelClosed".into()),
+                Ok(k) => k,
+            }
+        }),
+    )
 }
 
 /// sender side of a data channel

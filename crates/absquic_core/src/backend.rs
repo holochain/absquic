@@ -166,6 +166,7 @@ pub trait BackendDriverFactory: 'static + Send + Sync {
     fn construct_endpoint(
         &self,
         udp_backend: Arc<dyn UdpBackendFactory>,
+        timeouts_scheduler: Box<dyn TimeoutsScheduler>,
     ) -> AqBoxFut<
         'static,
         AqResult<(Sender<EndpointCmd>, Receiver<EndpointEvt>, BackendDriver)>,
