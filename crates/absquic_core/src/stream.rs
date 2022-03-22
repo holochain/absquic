@@ -1,6 +1,8 @@
 //! absquic_core stream types
 
 use crate::AqResult;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::Arc;
 use std::task::Context;
@@ -134,51 +136,6 @@ pub mod backend {
     }
 
     /*
-    pub(crate) struct ReadStreamInner {
-        pub(crate) closed: bool,
-        pub(crate) read_waker: Option<Waker>,
-        pub(crate) buffer: VecDeque<bytes::Bytes>,
-    }
-
-    pub(crate) type ReadStreamCore = Arc<Mutex<ReadStreamInner>>;
-
-    /// the backend of a read stream, allows publish data to the api user
-    pub struct ReadStreamBackend(ReadStreamCore);
-
-    impl Drop for ReadStreamBackend {
-        fn drop(&mut self) {
-            if let Some(waker) = {
-                let mut inner = self.0.lock();
-                inner.closed = true;
-                inner.read_waker.take()
-            } {
-                waker.wake();
-            }
-        }
-    }
-
-    impl ReadStreamBackend {
-        /// push data onto the read stream,
-        /// optionally also flagging it for close
-        pub fn push(
-            &self,
-            should_close: &mut bool,
-            wake_later: &mut WakeLater,
-            data: &mut VecDeque<bytes::Bytes>,
-            close: bool,
-        ) {
-            let mut inner = self.0.lock();
-            inner.buffer.append(data);
-            wake_later.push(inner.read_waker.take());
-            if close {
-                inner.closed = true;
-            }
-            if inner.closed {
-                *should_close = true;
-            }
-        }
-    }
-
     pub(crate) struct WriteStreamInner {
         pub(crate) closed: bool,
         pub(crate) gone: bool,
@@ -296,9 +253,23 @@ impl ReadStream {
     /// read a chunk of data from the stream
     pub async fn read_chunk(
         &mut self,
-        _max_bytes: usize,
+        max_bytes: usize,
     ) -> Option<bytes::Bytes> {
-        todo!()
+        struct X<'lt>(&'lt mut ReadStream, usize);
+
+        impl<'lt> Future for X<'lt> {
+            type Output = Option<bytes::Bytes>;
+
+            fn poll(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Self::Output> {
+                let max_bytes = self.1;
+                self.0.poll_read_chunk(cx, max_bytes)
+            }
+        }
+
+        X(self, max_bytes).await
     }
 
     /*
@@ -365,44 +336,6 @@ impl WriteStream {
 }
 
 /*
-/// Quic Read Stream
-pub struct ReadStream(ReadStreamCore);
-
-impl Drop for ReadStream {
-    fn drop(&mut self) {
-        self.0.lock().closed = true;
-    }
-}
-
-impl ReadStream {
-    /// Attempt to read data from this ReadStream
-    pub fn poll_read(
-        &mut self,
-        cx: &mut Context<'_>,
-        max_byte_count: usize,
-    ) -> Poll<AqResult<bytes::Bytes>> {
-        let mut inner = self.0.lock();
-        if inner.buffer.is_empty() {
-            if inner.closed {
-                Poll::Ready(Err("ReadStreamClosed".into()))
-            } else {
-                inner.read_waker = Some(cx.waker().clone());
-                Poll::Pending
-            }
-        } else {
-            if max_byte_count <= inner.buffer.front().unwrap().len() {
-                Poll::Ready(Ok(inner.buffer.pop_front().unwrap()))
-            } else {
-                Poll::Ready(Ok(inner
-                    .buffer
-                    .front_mut()
-                    .unwrap()
-                    .split_to(max_byte_count)))
-            }
-        }
-    }
-}
-
 /// Quic Write Stream
 pub struct WriteStream(WriteStreamCore);
 

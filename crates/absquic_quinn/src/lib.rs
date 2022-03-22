@@ -20,6 +20,12 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
+// buffer size for channels - arbitrary, needs experiments
+const BUF_CAP: usize = 64;
+
+// buffer size for read / write streams - arbitrary, needs experiments
+const BYTES_CAP: usize = 1024 * 16;
+
 #[derive(Clone)]
 struct WakerSlot(Arc<parking_lot::Mutex<Option<std::task::Waker>>>);
 
@@ -38,8 +44,6 @@ impl WakerSlot {
         }
     }
 }
-
-const BUF_CAP: usize = 64;
 
 /// absquic backend powered by quinn-proto
 pub struct QuinnDriverFactory {
@@ -158,7 +162,7 @@ impl ConnectionInfo {
         &mut self,
         stream_id: quinn_proto::StreamId,
     ) -> ReadStream {
-        let (rb, rf) = read_stream_pair();
+        let (rb, rf) = read_stream_pair(BYTES_CAP);
         self.streams.insert(stream_id, StreamInfo::UniIn(rb));
         rf
     }
@@ -168,7 +172,7 @@ impl ConnectionInfo {
         stream_id: quinn_proto::StreamId,
     ) -> (WriteStream, ReadStream) {
         let (wb, wf) = write_stream_pair();
-        let (rb, rf) = read_stream_pair();
+        let (rb, rf) = read_stream_pair(BYTES_CAP);
         self.streams.insert(stream_id, StreamInfo::Bi(wb, rb));
         (wf, rf)
     }
@@ -436,9 +440,7 @@ impl QuinnDriver {
                                     .streams()
                                     .open(quinn_proto::Dir::Bi)
                                 {
-                                    sender.send(Ok(
-                                        info.intake_bi(stream_id)
-                                    ));
+                                    sender.send(Ok(info.intake_bi(stream_id)));
                                 } else {
                                     if info.bi_buf.is_some() {
                                         sender.send(Err("pending outgoing bi stream already registered, only call open_bi_stream from a single clone of the connection".into()));
@@ -611,6 +613,68 @@ impl QuinnDriver {
                     }
                 } else {
                     break;
+                }
+            }
+
+            let ConnectionInfo {
+                connection,
+                streams,
+                ..
+            } = info;
+
+            for (stream_id, stream_info) in streams.iter_mut() {
+                let (_wb, rb) = match stream_info {
+                    StreamInfo::UniOut(wb) => (Some(wb), None),
+                    StreamInfo::UniIn(rb) => (None, Some(rb)),
+                    StreamInfo::Bi(wb, rb) => (Some(wb), Some(rb)),
+                };
+                if let Some(rb) = rb {
+                    let mut recv_stream = connection.recv_stream(*stream_id);
+                    let mut chunks = match recv_stream.read(true) {
+                        // TODO - close the stream instead
+                        Err(e) => return Err(format!("{:?}", e).into()),
+                        Ok(chunks) => chunks,
+                    };
+                    let mut err = None;
+                    loop {
+                        let (read_max, read_cb) = match rb.poll_request_push(cx)
+                        {
+                            Poll::Pending => break,
+                            Poll::Ready(Err(e)) => {
+                                err = Some(e);
+                                break;
+                            }
+                            Poll::Ready(Ok(r)) => r,
+                        };
+                        match chunks.next(read_max) {
+                            Err(quinn_proto::ReadError::Blocked) => break,
+                            Err(e) => {
+                                err = Some(format!("{:?}", e).into());
+                                break;
+                            }
+                            Ok(None) => {
+                                // TODO close the stream
+                                panic!("arrarg");
+                            }
+                            Ok(Some(chunk)) => {
+                                did_work = true;
+
+                                if chunk.bytes.len() > read_max {
+                                    panic!("unexpected large chunk");
+                                }
+
+                                read_cb(chunk.bytes);
+                            }
+                        }
+                    }
+
+                    if chunks.finalize().should_transmit() {
+                        did_work = true;
+                    }
+
+                    if let Some(err) = err {
+                        return Err(err);
+                    }
                 }
             }
         }
