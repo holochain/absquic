@@ -106,6 +106,8 @@ impl BackendDriverFactory for QuinnDriverFactory {
 
             let driver = BackendDriver::new(driver);
 
+            tracing::trace!("endpoint constructed");
+
             Ok((cmd_send, evt_recv, driver))
         })
     }
@@ -277,7 +279,10 @@ impl QuinnDriver {
         use EndpointCmd::*;
         loop {
             match self.cmd_recv.poll_recv(cx) {
-                Poll::Pending => return Ok(Disposition::PendOk),
+                Poll::Pending => {
+                    tracing::trace!("poll_cmd_recv pendok");
+                    return Ok(Disposition::PendOk);
+                }
                 Poll::Ready(None) => return Err("CmdRecvEnded".into()),
                 Poll::Ready(Some(cmd)) => match cmd {
                     GetLocalAddress(sender) => {
@@ -294,10 +299,16 @@ impl QuinnDriver {
                             addr,
                             &server_name,
                         ) {
-                            Err(e) => {
-                                sender.send(Err(format!("{:?}", e).into()))
+                            Err(err) => {
+                                tracing::error!(?err);
+                                sender.send(Err(format!("{:?}", err).into()))
                             }
                             Ok((hnd, con)) => {
+                                tracing::debug!(
+                                    ?hnd,
+                                    ?addr,
+                                    "new out connection"
+                                );
                                 let r = self.intake_connection(hnd, con)?;
                                 sender.send(Ok(r));
                             }
@@ -320,11 +331,15 @@ impl QuinnDriver {
                 // ok to pend, we'll set a waker on evt_send
                 // we shouldn't need to do work if we did work in a previous
                 // loop, since dependent calls follow this one
+                tracing::trace!("poll_udp_recv full-pendok");
                 return Ok(Disposition::PendOk);
             }
 
             match self.udp_recv.poll_recv(cx) {
-                Poll::Pending => return Ok(Disposition::PendOk),
+                Poll::Pending => {
+                    tracing::trace!("poll_udp_recv pendok");
+                    return Ok(Disposition::PendOk);
+                }
                 Poll::Ready(None) => return Err("UdpRecvEnded".into()),
                 Poll::Ready(Some(packet)) => {
                     if let Some((hnd, evt)) = self.endpoint.handle(
@@ -374,6 +389,8 @@ impl QuinnDriver {
                     ecn: transmit.ecn.map(|ecn| ecn as u8),
                     data: transmit.contents,
                 });
+            } else {
+                break;
             }
         }
 
@@ -402,8 +419,10 @@ impl QuinnDriver {
         }
 
         if did_work {
+            tracing::trace!("udp_send more work");
             Ok(Disposition::MoreWork)
         } else {
+            tracing::trace!("udp_send pendok");
             Ok(Disposition::PendOk)
         }
     }
@@ -426,8 +445,10 @@ impl QuinnDriver {
         }
 
         if did_work {
+            tracing::trace!("evt_send more work");
             Ok(Disposition::MoreWork)
         } else {
+            tracing::trace!("evt_send pendok");
             Ok(Disposition::PendOk)
         }
     }

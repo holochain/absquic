@@ -12,7 +12,11 @@ impl QuinnDriver {
 
         let mut did_work = false;
 
-        for (hnd, info) in self.connections.iter_mut() {
+        let mut remove_connections = Vec::new();
+
+        'con: for (hnd, info) in self.connections.iter_mut() {
+            tracing::trace!(?hnd, "poll_connections iter");
+
             // no-op if not needed, just always triggering for now
             info.connection.handle_timeout(now);
 
@@ -20,7 +24,10 @@ impl QuinnDriver {
             loop {
                 match info.cmd_recv.poll_recv(cx) {
                     Poll::Pending => break,
-                    Poll::Ready(None) => return Err("CmdRecvEnded".into()),
+                    Poll::Ready(None) => {
+                        remove_connections.push(*hnd);
+                        continue 'con;
+                    }
                     Poll::Ready(Some(cmd)) => {
                         did_work = true;
 
@@ -121,7 +128,10 @@ impl QuinnDriver {
                 while !info.evt_send_buf.is_empty() {
                     match info.evt_send.poll_send(cx) {
                         Poll::Pending => break,
-                        Poll::Ready(Err(e)) => return Err(e),
+                        Poll::Ready(Err(_)) => {
+                            remove_connections.push(*hnd);
+                            continue 'con;
+                        }
                         Poll::Ready(Ok(permit)) => {
                             did_work = true;
 
@@ -244,23 +254,16 @@ impl QuinnDriver {
                         Err(e) => return Err(format!("{:?}", e).into()),
                         Ok(chunks) => chunks,
                     };
-                    let mut err = None;
                     loop {
                         let (read_max, read_cb) = match rb.poll_request_push(cx)
                         {
                             Poll::Pending => break,
-                            Poll::Ready(Err(e)) => {
-                                err = Some(e);
-                                break;
-                            }
+                            Poll::Ready(Err(_)) => break,
                             Poll::Ready(Ok(r)) => r,
                         };
                         match chunks.next(read_max) {
                             Err(quinn_proto::ReadError::Blocked) => break,
-                            Err(e) => {
-                                err = Some(format!("{:?}", e).into());
-                                break;
-                            }
+                            Err(_) => break,
                             Ok(None) => {
                                 // TODO close the stream
                                 panic!("arrarg");
@@ -280,10 +283,6 @@ impl QuinnDriver {
                     if chunks.finalize().should_transmit() {
                         did_work = true;
                     }
-
-                    if let Some(err) = err {
-                        return Err(err);
-                    }
                 }
 
                 if let Some(wb) = wb {
@@ -300,7 +299,7 @@ impl QuinnDriver {
                         }) {
                             Poll::Pending => break,
                             // TODO - close the stream
-                            Poll::Ready(Err(e)) => return Err(e),
+                            Poll::Ready(Err(_)) => break,
                             Poll::Ready(Ok(cmd)) => {
                                 did_work = true;
                                 match cmd {
@@ -328,6 +327,18 @@ impl QuinnDriver {
             }
         }
 
+        for hnd in remove_connections {
+            did_work = true;
+
+            if let Some(mut info) = self.connections.remove(&hnd) {
+                info.connection.close(
+                    now,
+                    quinn_proto::VarInt::from_u32(0),
+                    absquic_core::deps::bytes::Bytes::new(),
+                );
+            }
+        }
+
         if let Some(next_timeout) = next_timeout {
             if next_timeout > now {
                 if self.next_timeout <= now || next_timeout < self.next_timeout
@@ -344,8 +355,10 @@ impl QuinnDriver {
         }
 
         if did_work {
+            tracing::trace!("poll_connections more work");
             Ok(Disposition::MoreWork)
         } else {
+            tracing::trace!("poll_connections pendok");
             Ok(Disposition::PendOk)
         }
     }

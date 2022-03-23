@@ -61,26 +61,6 @@ pub type EndpointRecv = Receiver<EndpointEvt>;
 pub struct Endpoint(Sender<EndpointCmd>);
 
 impl Endpoint {
-    /// construct a new endpoint
-    pub async fn new<U, D, S>(
-        udp_backend: U,
-        backend_driver: D,
-        timeouts_scheduler: S,
-    ) -> AqResult<(Endpoint, EndpointRecv, BackendDriver)>
-    where
-        U: UdpBackendFactory,
-        D: BackendDriverFactory,
-        S: TimeoutsScheduler,
-    {
-        let udp_backend: Arc<dyn UdpBackendFactory> = Arc::new(udp_backend);
-        let timeouts_scheduler: Box<dyn TimeoutsScheduler> =
-            Box::new(timeouts_scheduler);
-        let (cmd_send, evt_recv, driver) = backend_driver
-            .construct_endpoint(udp_backend, timeouts_scheduler)
-            .await?;
-        Ok((Endpoint(cmd_send), evt_recv, driver))
-    }
-
     /// the current address this endpoint is bound to
     pub async fn local_address(&mut self) -> AqResult<SocketAddr> {
         let (s, r) = one_shot_channel();
@@ -92,16 +72,56 @@ impl Endpoint {
     pub async fn connect(
         &mut self,
         addr: SocketAddr,
-        server_name: String,
+        server_name: &str,
     ) -> AqResult<(Connection, ConnectionRecv)> {
         let (s, r) = one_shot_channel();
         self.0
             .send(EndpointCmd::Connect {
                 sender: s,
                 addr,
-                server_name,
+                server_name: server_name.to_string(),
             })
             .await?;
         r.await
+    }
+}
+
+/// a factory that can construct absquic endpoints
+pub struct EndpointFactory {
+    udp_backend: Arc<dyn UdpBackendFactory>,
+    quic_backend: Arc<dyn BackendDriverFactory>,
+}
+
+impl EndpointFactory {
+    /// construct a new endpoint factory
+    pub fn new<U, D>(udp_backend: U, backend_driver: D) -> Self
+    where
+        U: UdpBackendFactory,
+        D: BackendDriverFactory,
+    {
+        let udp_backend: Arc<dyn UdpBackendFactory> = Arc::new(udp_backend);
+        let quic_backend: Arc<dyn BackendDriverFactory> =
+            Arc::new(backend_driver);
+        Self {
+            udp_backend,
+            quic_backend,
+        }
+    }
+
+    /// bind a new endpoint from this factory
+    pub async fn bind<S>(
+        &self,
+        timeouts_scheduler: S,
+    ) -> AqResult<(Endpoint, EndpointRecv, BackendDriver)>
+    where
+        S: TimeoutsScheduler,
+    {
+        let timeouts_scheduler: Box<dyn TimeoutsScheduler> =
+            Box::new(timeouts_scheduler);
+        let (cmd_send, evt_recv, driver) = self
+            .quic_backend
+            .construct_endpoint(self.udp_backend.clone(), timeouts_scheduler)
+            .await?;
+        Ok((Endpoint(cmd_send), evt_recv, driver))
     }
 }

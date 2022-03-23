@@ -81,6 +81,13 @@ impl Driver {
         util::Sender<OutUdpPacket>,
         util::Sender<DriverCmd>,
     ) {
+        tracing::debug!(
+            batch_size = %BATCH_SIZE,
+            initial_gso = %state.max_gso_segments(),
+            %max_udp_size,
+            "udp bind data"
+        );
+
         let mut read_bufs_raw = Vec::with_capacity(BATCH_SIZE);
         for _ in 0..BATCH_SIZE {
             let mut buf = bytes::BytesMut::with_capacity(max_udp_size);
@@ -121,10 +128,15 @@ impl Driver {
             disp.merge(self.poll_fwd_incoming(cx)?);
 
             match disp {
-                Disposition::PendOk => return Ok(Poll::Pending),
+                Disposition::PendOk => {
+                    tracing::trace!("udp pending");
+                    return Ok(Poll::Pending);
+                }
                 Disposition::MoreWork => (),
             }
         }
+
+        tracing::trace!("udp wake-pending");
 
         // we're not done, but neither are we pending...
         // need to trigger the waker, and try again
@@ -426,6 +438,9 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
             let socket = std::net::UdpSocket::bind(addr)?;
             let socket = quinn_udp::UdpSocket::from_std(socket)?;
 
+            let addr = socket.local_addr();
+            tracing::info!(?addr, "udp bound");
+
             let (driver, in_recv, packet_send, cmd_send) =
                 Driver::new(max_udp_size, state.clone(), socket);
 
@@ -442,6 +457,8 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
             let receiver = Receiver { receiver: in_recv };
 
             let receiver: DynUdpBackendReceiver = Box::new(receiver);
+
+            tracing::trace!("udp backend constructed");
 
             Ok((sender, receiver, driver))
         })
