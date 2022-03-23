@@ -89,6 +89,11 @@ impl<T: 'static + Send> OneShotReceiver<T> {
         Self { recv: Box::pin(f) }
     }
 
+    /// extract the inner boxed future, useful for forwarding
+    pub fn into_inner(self) -> OneShotFut<T> {
+        self.recv
+    }
+
     /// forward the result of this receiver to a different one shot sender
     pub fn forward(self, oth: OneShotSender<T>) {
         oth.forward(self)
