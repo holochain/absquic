@@ -1,29 +1,93 @@
 #![deny(missing_docs)]
 #![deny(warnings)]
 #![deny(unsafe_code)]
-//! absquic generic driver for arbitrary QUIC backend udp implementations
+//! Absquic quic transport library
+//!
+//! ### Quickstart
+//!
+//! ```
+//! # #[tokio::main(flavor = "multi_thread")]
+//! # async fn main() {
+//! use absquic::*;
+//! use absquic_quinn::*;
+//!
+//! // get a in-process cached local self-signed ephemeral tls certificate pair
+//! let (cert, pk) = dev_utils::local_ephem_tls_cert();
+//!
+//! // construct a new endpoint factory using the quinn backend types
+//! let endpoint_factory = EndpointFactory::new(
+//!     // use the quinn-udp udp backend
+//!     QuinnUdpBackendFactory::new(
+//!         ([127, 0, 0, 1], 0).into(), // bind only to localhost
+//!         None,                       // use default max_udp_size
+//!     ),
+//!
+//!     // use the quinn-proto powered backend driver
+//!     QuinnDriverFactory::new(
+//!         // defaults
+//!         EndpointConfig::default(),
+//!
+//!         // simple server using the ephemeral self-signed cert
+//!         Some(dev_utils::simple_server_config(cert, pk)),
+//!
+//!         // trusting client that accepts any and all tls certs
+//!         dev_utils::trusting_client_config(),
+//!     ),
+//! );
+//!
+//! // bind the actual udp port
+//! let (mut endpoint, _evt_recv, driver) = endpoint_factory
+//!     .bind(TokioTimeoutsScheduler::new())
+//!     .await
+//!     .unwrap();
+//!
+//! // spawn the backend driver future
+//! tokio::task::spawn(driver);
+//!
+//! // we can now make calls on the endpoint handle
+//! assert!(endpoint.local_address().await.is_ok());
+//!
+//! // and we could receive events on the event receiver like
+//! // while let Some(evt) = _evt_recv.recv().await {}
+//! # }
+//! ```
 
 /// re-exported dependencies
-pub mod dependencies {
-    pub use bytes;
-    pub use one_err;
-    pub use parking_lot;
-    pub use quinn_proto;
+pub mod deps {
+    pub use absquic_core;
+    pub use absquic_core::deps::bytes;
+    pub use absquic_core::deps::one_err;
+    pub use absquic_core::deps::parking_lot;
+
+    #[cfg(feature = "absquic_quinn")]
+    pub use absquic_quinn;
+
+    #[cfg(feature = "absquic_quinn_udp")]
+    pub use absquic_quinn_udp;
 }
 
-/// absquic result type
-pub type AqResult<T> = std::result::Result<T, one_err::OneErr>;
+pub use absquic_core::endpoint::Endpoint;
+pub use absquic_core::endpoint::EndpointEvt;
+pub use absquic_core::endpoint::EndpointFactory;
+pub use absquic_core::endpoint::EndpointRecv;
 
-pub mod types;
+pub use absquic_core::connection::Connection;
+pub use absquic_core::connection::ConnectionEvt;
+pub use absquic_core::connection::ConnectionRecv;
 
-mod out_chan;
-use out_chan::*;
+pub use absquic_core::stream::ReadStream;
+pub use absquic_core::stream::WriteStream;
 
-pub mod driver;
+#[cfg(feature = "absquic_quinn")]
+pub use absquic_quinn::{
+    QuinnClientConfig, QuinnDriverFactory, QuinnEndpointConfig,
+    QuinnServerConfig,
+};
 
-pub mod stream;
+#[cfg(feature = "absquic_quinn_udp")]
+pub use absquic_quinn_udp::QuinnUdpBackendFactory;
 
-pub mod connection;
-
-pub mod endpoint;
-pub use endpoint::Endpoint;
+#[cfg(feature = "tokio_time")]
+mod tokio_time;
+#[cfg(feature = "tokio_time")]
+pub use tokio_time::*;

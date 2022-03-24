@@ -4,7 +4,6 @@ use absquic_core::endpoint::*;
 use absquic_quinn::*;
 use absquic_quinn_udp::*;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -16,18 +15,10 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    let cert =
-        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let pk = rustls::PrivateKey(cert.serialize_private_key_der());
-    let cert = rustls::Certificate(cert.serialize_der().unwrap());
     let endpoint_config = quinn_proto::EndpointConfig::default();
-    let server_config =
-        quinn_proto::ServerConfig::with_single_cert(vec![cert], pk).unwrap();
-    let client_config = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(V))
-        .with_no_client_auth();
-    let client_config = quinn_proto::ClientConfig::new(Arc::new(client_config));
+    let (cert, pk) = dev_utils::local_ephem_tls_cert();
+    let server_config = dev_utils::simple_server_config(cert, pk);
+    let client_config = dev_utils::trusting_client_config();
 
     let udp_factory =
         QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
@@ -43,12 +34,12 @@ async fn main() {
     let (mut ep1, rc1, d1) = ep_factory.bind(T::default()).await.unwrap();
     tokio::task::spawn(d1);
     let addr1 = ep1.local_address().await.unwrap();
-    println!("{:?}", addr1);
+    println!("addr1: {:?}", addr1);
 
     let (mut ep2, rc2, d2) = ep_factory.bind(T::default()).await.unwrap();
     tokio::task::spawn(d2);
     let addr2 = ep2.local_address().await.unwrap();
-    println!("{:?}", addr2);
+    println!("addr2: {:?}", addr2);
 
     let mut all = Vec::new();
     all.push(tokio::task::spawn(run_ep_rcv("ep1rcv".into(), rc1)));
@@ -57,6 +48,8 @@ async fn main() {
     all.push(tokio::task::spawn(run_ep_hnd("ep2hnd".into(), ep2, addr1)));
 
     futures::future::try_join_all(all).await.unwrap();
+
+    println!("complete");
 }
 
 async fn run_ep_hnd(name: String, mut ep: Endpoint, oth_addr: SocketAddr) {
@@ -183,21 +176,5 @@ impl TimeoutsScheduler for T {
             tokio::time::sleep_until(at.into()).await;
             logic();
         }));
-    }
-}
-
-struct V;
-
-impl rustls::client::ServerCertVerifier for V {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
-        _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
     }
 }

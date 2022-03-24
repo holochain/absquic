@@ -166,8 +166,9 @@ impl QuinnDriver {
                         use quinn_proto::Event::*;
                         match evt {
                             HandshakeDataReady => {
-                                info.evt_send_buf
-                                    .push_back(ConnectionEvt::HandshakeDataReady);
+                                info.evt_send_buf.push_back(
+                                    ConnectionEvt::HandshakeDataReady,
+                                );
                             }
                             Connected => {
                                 info.evt_send_buf
@@ -175,9 +176,11 @@ impl QuinnDriver {
                             }
                             ConnectionLost { reason } => {
                                 info.want_close = true;
-                                info.evt_send_buf.push_back(ConnectionEvt::Error(
-                                    one_err::OneErr::new(reason),
-                                ));
+                                info.evt_send_buf.push_back(
+                                    ConnectionEvt::Error(one_err::OneErr::new(
+                                        reason,
+                                    )),
+                                );
                             }
                             Stream(quinn_proto::StreamEvent::Opened {
                                 dir: quinn_proto::Dir::Uni,
@@ -248,10 +251,12 @@ impl QuinnDriver {
                             }
                             Stream(evt) => panic!("unhandled event: {:?}", evt),
                             DatagramReceived => {
-                                if let Some(dg) = info.connection.datagrams().recv()
+                                if let Some(dg) =
+                                    info.connection.datagrams().recv()
                                 {
-                                    info.evt_send_buf
-                                        .push_back(ConnectionEvt::InDatagram(dg));
+                                    info.evt_send_buf.push_back(
+                                        ConnectionEvt::InDatagram(dg),
+                                    );
                                 }
                             }
                         }
@@ -261,10 +266,8 @@ impl QuinnDriver {
                 }
 
                 while info.evt_send_buf.len() < BUF_CAP {
-                    if let Some(stream_id) = info
-                        .connection
-                        .streams()
-                        .accept(quinn_proto::Dir::Uni)
+                    if let Some(stream_id) =
+                        info.connection.streams().accept(quinn_proto::Dir::Uni)
                     {
                         did_work = true;
                         did_con_poll_work = true;
@@ -279,18 +282,15 @@ impl QuinnDriver {
                 }
 
                 while info.evt_send_buf.len() < BUF_CAP {
-                    if let Some(stream_id) = info
-                        .connection
-                        .streams()
-                        .accept(quinn_proto::Dir::Bi)
+                    if let Some(stream_id) =
+                        info.connection.streams().accept(quinn_proto::Dir::Bi)
                     {
                         did_work = true;
                         did_con_poll_work = true;
 
                         let (wf, rf) = info.intake_bi(stream_id);
-                        info.evt_send_buf.push_back(
-                            ConnectionEvt::InBiStream(wf, rf),
-                        );
+                        info.evt_send_buf
+                            .push_back(ConnectionEvt::InBiStream(wf, rf));
                     } else {
                         break;
                     }
@@ -432,7 +432,7 @@ impl QuinnDriver {
                 && info.streams.is_empty()
                 && !info.connection.is_closed()
             {
-                tracing::debug!( ?hnd, "closing connection");
+                tracing::debug!(?hnd, "closing connection");
                 info.connection.close(
                     now,
                     quinn_proto::VarInt::from_u32(0),

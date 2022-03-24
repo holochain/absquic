@@ -21,6 +21,19 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
+/// re-exported dependencies
+pub mod deps {
+    pub use absquic_core;
+    pub use quinn_proto;
+    pub use rustls;
+}
+
+pub use quinn_proto::EndpointConfig as QuinnEndpointConfig;
+pub use quinn_proto::ServerConfig as QuinnServerConfig;
+pub use quinn_proto::ClientConfig as QuinnClientConfig;
+
+pub mod dev_utils;
+
 static UNIQ: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
 
 fn uniq() -> usize {
@@ -62,9 +75,9 @@ pub struct QuinnDriverFactory {
 impl QuinnDriverFactory {
     /// construct a new absquic driver factory backed by quinn-proto
     pub fn new(
-        endpoint_config: quinn_proto::EndpointConfig,
-        server_config: Option<quinn_proto::ServerConfig>,
-        client_config: quinn_proto::ClientConfig,
+        endpoint_config: QuinnEndpointConfig,
+        server_config: Option<QuinnServerConfig>,
+        client_config: QuinnClientConfig,
     ) -> Self {
         Self {
             endpoint_config: Arc::new(endpoint_config),
