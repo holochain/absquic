@@ -11,6 +11,7 @@ tracing = { version = "0.1.32" }
 
 [dev-dependencies]
 absquic_quinn_udp = { version = "0.0.1", path = "../absquic_quinn_udp" }
+futures = "0.3.21"
 rcgen = "0.9.2"
 tokio = { version = "1.17.0", features = [ "full" ] }
 tracing-subscriber = { version = "0.3.9", features = [ "env-filter" ] }

@@ -129,14 +129,11 @@ impl Driver {
 
             match disp {
                 Disposition::PendOk => {
-                    tracing::trace!("udp pending");
                     return Ok(Poll::Pending);
                 }
                 Disposition::MoreWork => (),
             }
         }
-
-        tracing::trace!("udp wake-pending");
 
         // we're not done, but neither are we pending...
         // need to trigger the waker, and try again
@@ -457,8 +454,6 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
             let receiver = Receiver { receiver: in_recv };
 
             let receiver: DynUdpBackendReceiver = Box::new(receiver);
-
-            tracing::trace!("udp backend constructed");
 
             Ok((sender, receiver, driver))
         })

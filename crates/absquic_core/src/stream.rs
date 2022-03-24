@@ -434,6 +434,17 @@ impl WriteStream {
         X(self, chunk).await
     }
 
+    /// write data completely to the stream
+    pub async fn write_chunk_all(
+        &mut self,
+        chunk: &mut bytes::Bytes,
+    ) -> AqResult<()> {
+        while !chunk.is_empty() {
+            self.write_chunk(chunk).await?;
+        }
+        Ok(())
+    }
+
     /// signal shutdown on this write channel
     pub fn finish(self) -> OneShotReceiver<()> {
         OneShotReceiver::new(async move {

@@ -1,6 +1,9 @@
+use absquic_core::connection::*;
+use absquic_core::deps::bytes;
 use absquic_core::endpoint::*;
 use absquic_quinn::*;
 use absquic_quinn_udp::*;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -9,7 +12,6 @@ async fn main() {
         .with_env_filter(
             tracing_subscriber::filter::EnvFilter::from_default_env(),
         )
-        .compact()
         .without_time()
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
@@ -38,57 +40,126 @@ async fn main() {
 
     let ep_factory = EndpointFactory::new(udp_factory, quic_factory);
 
-    let (mut ep1, mut rc1, d1) = ep_factory.bind(T::default()).await.unwrap();
+    let (mut ep1, rc1, d1) = ep_factory.bind(T::default()).await.unwrap();
     tokio::task::spawn(d1);
-    tokio::task::spawn(async move {
-        while let Some(evt) = rc1.recv().await {
-            match evt {
-                EndpointEvt::Error(e) => panic!("{:?}", e),
-                EndpointEvt::InConnection(_, _) => panic!("unexpected con"),
-            }
-        }
-        tracing::warn!("rc1 loop ending");
-    });
-    println!("{:?}", ep1.local_address().await.unwrap());
+    let addr1 = ep1.local_address().await.unwrap();
+    println!("{:?}", addr1);
 
-    let (mut ep2, mut rc2, d2) = ep_factory.bind(T::default()).await.unwrap();
+    let (mut ep2, rc2, d2) = ep_factory.bind(T::default()).await.unwrap();
     tokio::task::spawn(d2);
-    tokio::task::spawn(async move {
-        while let Some(evt) = rc2.recv().await {
-            match evt {
-                EndpointEvt::Error(e) => panic!("{:?}", e),
-                EndpointEvt::InConnection(_con, recv) => {
-                    tracing::warn!("got in connection");
-                    tokio::task::spawn(async move {
-                        let _con = _con;
-                        let mut recv = recv.wait_connected().await.unwrap();
-                        tracing::warn!("in connection connected");
-                        while let Some(_evt) = recv.recv().await {
-                            panic!("GOT EVENT");
-                        }
-                    });
-                }
-            }
-        }
-        tracing::warn!("rc2 loop ending");
-    });
     let addr2 = ep2.local_address().await.unwrap();
     println!("{:?}", addr2);
 
-    for _ in 0..10 {
-        let (_con, recv) = ep1.connect(addr2, "noname").await.unwrap();
-        tracing::warn!("got out connection");
-        tokio::task::spawn(async move {
-            let _con = _con;
-            let mut recv = recv.wait_connected().await.unwrap();
-            tracing::warn!("out connection connected");
-            while let Some(_evt) = recv.recv().await {
-                panic!("GOT EVENT");
+    let mut all = Vec::new();
+    all.push(tokio::task::spawn(run_ep_rcv("ep1rcv".into(), rc1)));
+    all.push(tokio::task::spawn(run_ep_rcv("ep2rcv".into(), rc2)));
+    all.push(tokio::task::spawn(run_ep_hnd("ep1hnd".into(), ep1, addr2)));
+    all.push(tokio::task::spawn(run_ep_hnd("ep2hnd".into(), ep2, addr1)));
+
+    futures::future::try_join_all(all).await.unwrap();
+}
+
+async fn run_ep_hnd(name: String, mut ep: Endpoint, oth_addr: SocketAddr) {
+    let mut all = Vec::new();
+    //for _ in 0..10 {
+    for _ in 0..1 {
+        let (con, rcv) = ep.connect(oth_addr, "localhost").await.unwrap();
+        all.push(tokio::task::spawn(run_con(
+            format!("{}:out_con", name),
+            con,
+            rcv,
+        )));
+    }
+    futures::future::try_join_all(all).await.unwrap();
+}
+
+async fn run_ep_rcv(name: String, mut rcv: EndpointRecv) {
+    let mut all = Vec::new();
+    while let Some(evt) = rcv.recv().await {
+        match evt {
+            EndpointEvt::Error(e) => panic!("{:?}", e),
+            EndpointEvt::InConnection(con, rcv) => {
+                if all.len() >= 10 {
+                    panic!("too many in connections");
+                }
+                all.push(tokio::task::spawn(run_con(
+                    format!("{}:in_con", name),
+                    con,
+                    rcv,
+                )));
             }
-        });
+        }
+    }
+    if all.len() != 1 {
+        panic!("expected 1 connections, got {}", all.len());
+    }
+    tracing::warn!(%name, "loop ending");
+    futures::future::try_join_all(all).await.unwrap();
+}
+
+static WRITE_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static READ_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+async fn run_con(name: String, mut con: Connection, rcv: ConnectionRecv) {
+    let mut rcv = rcv.wait_connected().await.unwrap();
+
+    let mut all = Vec::new();
+
+    all.push(tokio::task::spawn(async move {
+        let mut all = Vec::new();
+        while let Some(evt) = rcv.recv().await {
+            match evt {
+                ConnectionEvt::Error(e) => panic!("{:?}", e),
+                ConnectionEvt::InUniStream(mut r) => {
+                    if all.len() >= 10 {
+                        panic!("too many in streams");
+                    }
+                    all.push(tokio::task::spawn(async move {
+                        let mut full_buf = bytes::BytesMut::new();
+                        while let Some(bytes) = r.read_chunk(usize::MAX).await {
+                            full_buf.extend_from_slice(bytes.as_ref());
+                        }
+                        assert_eq!(full_buf.as_ref(), b"hello");
+                        tracing::info!(
+                            "READ SUCCESS {}",
+                            READ_COUNT.fetch_add(
+                                1,
+                                std::sync::atomic::Ordering::SeqCst
+                            ) + 1
+                        );
+                    }));
+                }
+                _ => (),
+            }
+        }
+        if all.len() != 10 {
+            panic!("expected 10 in streams, got {}", all.len());
+        }
+        tracing::warn!(%name, "rcv loop ending");
+        futures::future::try_join_all(all).await.unwrap();
+    }));
+
+    for _ in 0..10 {
+        let mut stream = con.open_uni_stream().await.unwrap();
+        all.push(tokio::task::spawn(async move {
+            let mut data = (&b"hello"[..]).into();
+            stream.write_chunk_all(&mut data).await.unwrap();
+            stream.finish().await.unwrap();
+            tracing::info!(
+                "WRITE SUCCESS {}",
+                WRITE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1
+            );
+        }));
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    // TODO - remove this when we have a graceful con shutdown option
+    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    drop(con);
+
+    futures::future::try_join_all(all).await.unwrap();
 }
 
 struct T(Option<tokio::task::JoinHandle<()>>);

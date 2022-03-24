@@ -6,7 +6,7 @@
 use absquic_core::backend::*;
 use absquic_core::connection::backend::*;
 use absquic_core::connection::*;
-use absquic_core::deps::{one_err, parking_lot};
+use absquic_core::deps::{bytes, one_err, parking_lot};
 use absquic_core::endpoint::backend::*;
 use absquic_core::endpoint::*;
 use absquic_core::stream::backend::*;
@@ -16,9 +16,16 @@ use absquic_core::*;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::sync::atomic;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
+
+static UNIQ: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
+
+fn uniq() -> usize {
+    UNIQ.fetch_add(1, atomic::Ordering::Relaxed)
+}
 
 // buffer size for channels - arbitrary, needs experiments
 const BUF_CAP: usize = 64;
@@ -89,6 +96,7 @@ impl BackendDriverFactory for QuinnDriverFactory {
             let (evt_send, evt_recv) = channel(BUF_CAP);
 
             let driver = QuinnDriver {
+                _uniq: format!("{}", uniq()),
                 waker: WakerSlot::new(),
                 udp_driver,
                 udp_send,
@@ -105,8 +113,6 @@ impl BackendDriverFactory for QuinnDriverFactory {
             };
 
             let driver = BackendDriver::new(driver);
-
-            tracing::trace!("endpoint constructed");
 
             Ok((cmd_send, evt_recv, driver))
         })
@@ -135,9 +141,59 @@ impl Disposition {
 }
 
 enum StreamInfo {
-    UniOut(WriteStreamBackend),
-    UniIn(ReadStreamBackend),
-    Bi(WriteStreamBackend, ReadStreamBackend),
+    UniOut(Option<WriteStreamBackend>),
+    UniIn(Option<ReadStreamBackend>),
+    Bi(Option<WriteStreamBackend>, Option<ReadStreamBackend>),
+}
+
+impl StreamInfo {
+    fn is_closed(&self) -> bool {
+        match self {
+            StreamInfo::UniOut(None)
+            | StreamInfo::UniIn(None)
+            | StreamInfo::Bi(None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn get_read(&mut self) -> Option<&mut ReadStreamBackend> {
+        match self {
+            StreamInfo::UniOut(_) => None,
+            StreamInfo::UniIn(r) => r.as_mut(),
+            StreamInfo::Bi(_, r) => r.as_mut(),
+        }
+    }
+
+    fn rm_read(&mut self) {
+        match self {
+            StreamInfo::UniOut(_) => (),
+            StreamInfo::UniIn(r) => *r = None,
+            StreamInfo::Bi(_, r) => *r = None,
+        }
+    }
+
+    fn get_write(&mut self) -> Option<&mut WriteStreamBackend> {
+        match self {
+            StreamInfo::UniOut(w) => w.as_mut(),
+            StreamInfo::UniIn(_) => None,
+            StreamInfo::Bi(w, _) => w.as_mut(),
+        }
+    }
+
+    fn rm_write(&mut self) {
+        match self {
+            StreamInfo::UniOut(w) => *w = None,
+            StreamInfo::UniIn(_) => (),
+            StreamInfo::Bi(w, _) => *w = None,
+        }
+    }
+
+    /*
+    fn rm_both(&mut self) {
+        self.rm_read();
+        self.rm_write();
+    }
+    */
 }
 
 struct ConnectionInfo {
@@ -148,6 +204,7 @@ struct ConnectionInfo {
     evt_send_buf: VecDeque<ConnectionEvt>,
     uni_out_buf: Option<OneShotSender<WriteStream>>,
     bi_buf: Option<OneShotSender<(WriteStream, ReadStream)>>,
+    want_close: bool,
 }
 
 impl ConnectionInfo {
@@ -156,7 +213,7 @@ impl ConnectionInfo {
         stream_id: quinn_proto::StreamId,
     ) -> WriteStream {
         let (wb, wf) = write_stream_pair(BYTES_CAP);
-        self.streams.insert(stream_id, StreamInfo::UniOut(wb));
+        self.streams.insert(stream_id, StreamInfo::UniOut(Some(wb)));
         wf
     }
 
@@ -165,7 +222,7 @@ impl ConnectionInfo {
         stream_id: quinn_proto::StreamId,
     ) -> ReadStream {
         let (rb, rf) = read_stream_pair(BYTES_CAP);
-        self.streams.insert(stream_id, StreamInfo::UniIn(rb));
+        self.streams.insert(stream_id, StreamInfo::UniIn(Some(rb)));
         rf
     }
 
@@ -175,12 +232,14 @@ impl ConnectionInfo {
     ) -> (WriteStream, ReadStream) {
         let (wb, wf) = write_stream_pair(BYTES_CAP);
         let (rb, rf) = read_stream_pair(BYTES_CAP);
-        self.streams.insert(stream_id, StreamInfo::Bi(wb, rb));
+        self.streams
+            .insert(stream_id, StreamInfo::Bi(Some(wb), Some(rb)));
         (wf, rf)
     }
 }
 
 struct QuinnDriver {
+    _uniq: String,
     waker: WakerSlot,
     udp_driver: BackendDriver,
     udp_send: DynUdpBackendSender,
@@ -203,6 +262,8 @@ impl Future for QuinnDriver {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Self::Output> {
+        let _span = tracing::error_span!("poll", uniq = ?self._uniq).entered();
+
         match self.poll_inner(cx) {
             Err(e) => {
                 tracing::error!("{:?}", e);
@@ -233,6 +294,7 @@ impl QuinnDriver {
                 evt_send_buf: VecDeque::with_capacity(BUF_CAP),
                 uni_out_buf: None,
                 bi_buf: None,
+                want_close: false,
             },
         );
         Ok(construct_connection(cmd_send, evt_recv))
@@ -261,7 +323,10 @@ impl QuinnDriver {
             disp.merge(self.poll_evt_send(cx)?);
 
             match disp {
-                Disposition::PendOk => return Ok(Poll::Pending),
+                Disposition::PendOk => {
+                    tracing::trace!("backend driver pending");
+                    return Ok(Poll::Pending);
+                }
                 Disposition::MoreWork => (),
             }
         }
@@ -280,7 +345,6 @@ impl QuinnDriver {
         loop {
             match self.cmd_recv.poll_recv(cx) {
                 Poll::Pending => {
-                    tracing::trace!("poll_cmd_recv pendok");
                     return Ok(Disposition::PendOk);
                 }
                 Poll::Ready(None) => return Err("CmdRecvEnded".into()),
@@ -331,13 +395,11 @@ impl QuinnDriver {
                 // ok to pend, we'll set a waker on evt_send
                 // we shouldn't need to do work if we did work in a previous
                 // loop, since dependent calls follow this one
-                tracing::trace!("poll_udp_recv full-pendok");
                 return Ok(Disposition::PendOk);
             }
 
             match self.udp_recv.poll_recv(cx) {
                 Poll::Pending => {
-                    tracing::trace!("poll_udp_recv pendok");
                     return Ok(Disposition::PendOk);
                 }
                 Poll::Ready(None) => return Err("UdpRecvEnded".into()),
@@ -419,10 +481,8 @@ impl QuinnDriver {
         }
 
         if did_work {
-            tracing::trace!("udp_send more work");
             Ok(Disposition::MoreWork)
         } else {
-            tracing::trace!("udp_send pendok");
             Ok(Disposition::PendOk)
         }
     }
@@ -445,10 +505,8 @@ impl QuinnDriver {
         }
 
         if did_work {
-            tracing::trace!("evt_send more work");
             Ok(Disposition::MoreWork)
         } else {
-            tracing::trace!("evt_send pendok");
             Ok(Disposition::PendOk)
         }
     }
