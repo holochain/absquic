@@ -112,6 +112,7 @@ async fn run_con(name: String, mut con: Connection, rcv: ConnectionRecv) {
                     all.push(tokio::task::spawn(async move {
                         let mut full_buf = bytes::BytesMut::new();
                         while let Some(bytes) = r.read_chunk(usize::MAX).await {
+                            let bytes = bytes.unwrap();
                             full_buf.extend_from_slice(bytes.as_ref());
                         }
                         assert_eq!(full_buf.as_ref(), b"hello");

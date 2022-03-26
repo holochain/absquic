@@ -307,6 +307,8 @@ impl QuinnDriver {
                 let mut remove = false;
 
                 if let Some(rb) = stream_info.get_read() {
+                    let mut stop_code = None;
+
                     let mut recv_stream =
                         info.connection.recv_stream(*stream_id);
                     match recv_stream.read(true) {
@@ -317,11 +319,12 @@ impl QuinnDriver {
                         Ok(mut chunks) => {
                             loop {
                                 let (read_max, read_cb) =
-                                    match rb.poll_request_push(cx) {
+                                    match rb.poll_supply_data(cx) {
                                         Poll::Pending => break,
-                                        Poll::Ready(Err(_)) => {
+                                        Poll::Ready(Err(code)) => {
                                             did_work = true;
                                             remove = true;
+                                            stop_code = Some(code);
                                             break;
                                         }
                                         Poll::Ready(Ok(r)) => r,
@@ -347,7 +350,11 @@ impl QuinnDriver {
                                             panic!("unexpected large chunk");
                                         }
 
-                                        read_cb(chunk.bytes);
+                                        if let Err(code) = read_cb(chunk.bytes) {
+                                            remove = true;
+                                            stop_code = Some(code);
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -357,6 +364,13 @@ impl QuinnDriver {
                             }
                         }
                     };
+
+                    if let Some(code) = stop_code {
+                        remove = true;
+                        if let Ok(code) = quinn_proto::VarInt::from_u64(code) {
+                            let _ = recv_stream.stop(code);
+                        }
+                    }
                 }
 
                 if remove {

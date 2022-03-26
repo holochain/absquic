@@ -25,7 +25,7 @@
 //!     // use the quinn-proto powered backend driver
 //!     QuinnDriverFactory::new(
 //!         // defaults
-//!         EndpointConfig::default(),
+//!         QuinnEndpointConfig::default(),
 //!
 //!         // simple server using the ephemeral self-signed cert
 //!         Some(dev_utils::simple_server_config(cert, pk)),
