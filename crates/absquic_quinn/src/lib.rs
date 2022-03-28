@@ -120,7 +120,9 @@ impl BackendDriverFactory for QuinnDriverFactory {
                 client_config,
                 endpoint,
                 connections: HashMap::new(),
+                cmd_closed: false,
                 cmd_recv,
+                evt_closed: false,
                 evt_send,
                 evt_send_buf: VecDeque::with_capacity(BUF_CAP),
                 next_timeout: std::time::Instant::now(),
@@ -217,15 +219,24 @@ impl StreamInfo {
 struct ConnectionInfo {
     connection: quinn_proto::Connection,
     streams: HashMap<quinn_proto::StreamId, StreamInfo>,
+    cmd_closed: bool,
     cmd_recv: Receiver<ConnectionCmd>,
+    evt_closed: bool,
     evt_send: Sender<ConnectionEvt>,
     evt_send_buf: VecDeque<ConnectionEvt>,
     uni_out_buf: Option<OneShotSender<WriteStream>>,
     bi_buf: Option<OneShotSender<(WriteStream, ReadStream)>>,
-    want_close: bool,
 }
 
 impl ConnectionInfo {
+    fn push_evt(&mut self, evt: ConnectionEvt) {
+        if self.evt_closed {
+            drop(evt);
+        } else {
+            self.evt_send_buf.push_back(evt);
+        }
+    }
+
     fn intake_uni_out(
         &mut self,
         stream_id: quinn_proto::StreamId,
@@ -267,7 +278,9 @@ struct QuinnDriver {
     client_config: Arc<quinn_proto::ClientConfig>,
     endpoint: quinn_proto::Endpoint,
     connections: HashMap<quinn_proto::ConnectionHandle, ConnectionInfo>,
+    cmd_closed: bool,
     cmd_recv: Receiver<EndpointCmd>,
+    evt_closed: bool,
     evt_send: Sender<EndpointEvt>,
     evt_send_buf: VecDeque<EndpointEvt>,
     next_timeout: std::time::Instant,
@@ -307,12 +320,13 @@ impl QuinnDriver {
             ConnectionInfo {
                 connection: con,
                 streams: HashMap::new(),
+                cmd_closed: false,
                 cmd_recv,
+                evt_closed: false,
                 evt_send,
                 evt_send_buf: VecDeque::with_capacity(BUF_CAP),
                 uni_out_buf: None,
                 bi_buf: None,
-                want_close: false,
             },
         );
         Ok(construct_connection(cmd_send, evt_recv))
@@ -340,6 +354,12 @@ impl QuinnDriver {
             disp.merge(self.poll_udp_send(cx)?);
             disp.merge(self.poll_evt_send(cx)?);
 
+            // consider it a shutdown if we have no cmd receiver,
+            // and no event sender
+            if self.cmd_closed && self.evt_closed {
+                return Ok(Poll::Ready(()));
+            }
+
             match disp {
                 Disposition::PendOk => {
                     tracing::trace!("backend driver pending");
@@ -359,13 +379,20 @@ impl QuinnDriver {
         &mut self,
         cx: &mut Context<'_>,
     ) -> AqResult<Disposition> {
+        if self.cmd_closed {
+            return Ok(Disposition::PendOk);
+        }
+
         use EndpointCmd::*;
         loop {
             match self.cmd_recv.poll_recv(cx) {
                 Poll::Pending => {
                     return Ok(Disposition::PendOk);
                 }
-                Poll::Ready(None) => return Err("CmdRecvEnded".into()),
+                Poll::Ready(None) => {
+                    self.cmd_closed = true;
+                    return Ok(Disposition::PendOk);
+                }
                 Poll::Ready(Some(cmd)) => match cmd {
                     GetLocalAddress(sender) => {
                         let recv = self.udp_send.local_addr();
@@ -446,8 +473,14 @@ impl QuinnDriver {
                             NewConnection(con) => {
                                 let (c, r) =
                                     self.intake_connection(hnd, con)?;
-                                self.evt_send_buf
-                                    .push_back(EndpointEvt::InConnection(c, r));
+                                if self.evt_closed {
+                                    drop(c);
+                                    drop(r);
+                                } else {
+                                    self.evt_send_buf.push_back(
+                                        EndpointEvt::InConnection(c, r),
+                                    );
+                                }
                             }
                         }
                     }
@@ -511,13 +544,22 @@ impl QuinnDriver {
     ) -> AqResult<Disposition> {
         let mut did_work = false;
 
-        while !self.evt_send_buf.is_empty() {
-            match self.evt_send.poll_send(cx) {
-                Poll::Pending => return Ok(Disposition::PendOk),
-                Poll::Ready(Err(e)) => return Err(e),
-                Poll::Ready(Ok(permit)) => {
-                    did_work = true;
-                    permit(self.evt_send_buf.pop_front().unwrap());
+        if !self.evt_closed {
+            while !self.evt_send_buf.is_empty() {
+                match self.evt_send.poll_send(cx) {
+                    Poll::Pending => return Ok(Disposition::PendOk),
+                    Poll::Ready(Err(err)) => {
+                        tracing::error!(?err);
+                        self.evt_closed = true;
+                        while let Some(evt) = self.evt_send_buf.pop_front() {
+                            drop(evt);
+                        }
+                        break;
+                    }
+                    Poll::Ready(Ok(permit)) => {
+                        did_work = true;
+                        permit(self.evt_send_buf.pop_front().unwrap());
+                    }
                 }
             }
         }

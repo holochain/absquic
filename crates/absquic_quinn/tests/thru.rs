@@ -5,12 +5,14 @@ use absquic_quinn::*;
 use absquic_quinn_udp::*;
 use std::net::SocketAddr;
 
-#[tokio::main(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn main() {
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .with_env_filter(
             tracing_subscriber::filter::EnvFilter::from_default_env(),
         )
+        .with_file(true)
+        .with_line_number(true)
         .without_time()
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
@@ -54,8 +56,7 @@ async fn main() {
 
 async fn run_ep_hnd(name: String, mut ep: Endpoint, oth_addr: SocketAddr) {
     let mut all = Vec::new();
-    //for _ in 0..10 {
-    for _ in 0..1 {
+    for _ in 0..10 {
         let (con, rcv) = ep.connect(oth_addr, "localhost").await.unwrap();
         all.push(tokio::task::spawn(run_con(
             format!("{}:out_con", name),
@@ -64,6 +65,7 @@ async fn run_ep_hnd(name: String, mut ep: Endpoint, oth_addr: SocketAddr) {
         )));
     }
     futures::future::try_join_all(all).await.unwrap();
+    tracing::warn!(%name, "connect loop ending");
 }
 
 async fn run_ep_rcv(name: String, mut rcv: EndpointRecv) {
@@ -72,22 +74,22 @@ async fn run_ep_rcv(name: String, mut rcv: EndpointRecv) {
         match evt {
             EndpointEvt::Error(e) => panic!("{:?}", e),
             EndpointEvt::InConnection(con, rcv) => {
-                if all.len() >= 10 {
-                    panic!("too many in connections");
-                }
                 all.push(tokio::task::spawn(run_con(
                     format!("{}:in_con", name),
                     con,
                     rcv,
                 )));
+                if all.len() == 10 {
+                    break;
+                }
             }
         }
     }
-    if all.len() != 1 {
-        panic!("expected 1 connections, got {}", all.len());
+    if all.len() != 10 {
+        panic!("expected 10 connections, got {}", all.len());
     }
-    tracing::warn!(%name, "loop ending");
     futures::future::try_join_all(all).await.unwrap();
+    tracing::warn!(%name, "recv loop ending");
 }
 
 static WRITE_COUNT: std::sync::atomic::AtomicUsize =
@@ -100,15 +102,14 @@ async fn run_con(name: String, mut con: Connection, rcv: ConnectionRecv) {
 
     let mut all = Vec::new();
 
+    let recv_name = format!("{}:recv_loop", name);
+
     all.push(tokio::task::spawn(async move {
         let mut all = Vec::new();
         while let Some(evt) = rcv.recv().await {
             match evt {
                 ConnectionEvt::Error(e) => panic!("{:?}", e),
                 ConnectionEvt::InUniStream(mut r) => {
-                    if all.len() >= 10 {
-                        panic!("too many in streams");
-                    }
                     all.push(tokio::task::spawn(async move {
                         let mut full_buf = bytes::BytesMut::new();
                         while let Some(bytes) = r.read_bytes(usize::MAX).await {
@@ -124,6 +125,9 @@ async fn run_con(name: String, mut con: Connection, rcv: ConnectionRecv) {
                             ) + 1
                         );
                     }));
+                    if all.len() == 10 {
+                        break;
+                    }
                 }
                 _ => (),
             }
@@ -131,8 +135,8 @@ async fn run_con(name: String, mut con: Connection, rcv: ConnectionRecv) {
         if all.len() != 10 {
             panic!("expected 10 in streams, got {}", all.len());
         }
-        tracing::warn!(%name, "rcv loop ending");
         futures::future::try_join_all(all).await.unwrap();
+        tracing::info!(%recv_name, "rcv loop ending");
     }));
 
     for _ in 0..10 {
@@ -149,11 +153,10 @@ async fn run_con(name: String, mut con: Connection, rcv: ConnectionRecv) {
         }));
     }
 
-    // TODO - remove this when we have a graceful con shutdown option
-    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
     drop(con);
 
     futures::future::try_join_all(all).await.unwrap();
+    tracing::info!(%name, "run_con COMPLETE");
 }
 
 struct T(Option<tokio::task::JoinHandle<()>>);

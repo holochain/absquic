@@ -24,60 +24,53 @@ impl QuinnDriver {
             info.connection.handle_timeout(now);
 
             // poll cmd_recv
-            loop {
-                match info.cmd_recv.poll_recv(cx) {
-                    Poll::Pending => break,
-                    Poll::Ready(None) => {
-                        info.want_close = true;
-                        break;
-                    }
-                    Poll::Ready(Some(cmd)) => {
-                        did_work = true;
+            if !info.cmd_closed {
+                loop {
+                    match info.cmd_recv.poll_recv(cx) {
+                        Poll::Pending => break,
+                        Poll::Ready(None) => {
+                            info.cmd_closed = true;
+                            break;
+                        }
+                        Poll::Ready(Some(cmd)) => {
+                            did_work = true;
 
-                        use ConnectionCmd::*;
-                        match cmd {
-                            GetRemoteAddress(sender) => {
-                                sender
-                                    .send(Ok(info.connection.remote_address()));
-                            }
-                            OpenUniStream(sender) => {
-                                if info.want_close {
-                                    sender
-                                        .send(Err("ConnectionClosing".into()));
-                                    continue;
+                            use ConnectionCmd::*;
+                            match cmd {
+                                GetRemoteAddress(sender) => {
+                                    sender.send(Ok(info
+                                        .connection
+                                        .remote_address()));
                                 }
-
-                                if let Some(stream_id) = info
-                                    .connection
-                                    .streams()
-                                    .open(quinn_proto::Dir::Uni)
-                                {
-                                    sender.send(Ok(
-                                        info.intake_uni_out(stream_id)
-                                    ));
-                                } else if info.uni_out_buf.is_some() {
-                                    sender.send(Err("pending outgoing uni stream already registered, only call open_uni_stream from a single clone of the connection".into()));
-                                } else {
-                                    info.uni_out_buf = Some(sender);
+                                OpenUniStream(sender) => {
+                                    if let Some(stream_id) = info
+                                        .connection
+                                        .streams()
+                                        .open(quinn_proto::Dir::Uni)
+                                    {
+                                        sender.send(Ok(
+                                            info.intake_uni_out(stream_id)
+                                        ));
+                                    } else if info.uni_out_buf.is_some() {
+                                        sender.send(Err("pending outgoing uni stream already registered, only call open_uni_stream from a single clone of the connection".into()));
+                                    } else {
+                                        info.uni_out_buf = Some(sender);
+                                    }
                                 }
-                            }
-                            OpenBiStream(sender) => {
-                                if info.want_close {
-                                    sender
-                                        .send(Err("ConnectionClosing".into()));
-                                    continue;
-                                }
-
-                                if let Some(stream_id) = info
-                                    .connection
-                                    .streams()
-                                    .open(quinn_proto::Dir::Bi)
-                                {
-                                    sender.send(Ok(info.intake_bi(stream_id)));
-                                } else if info.bi_buf.is_some() {
-                                    sender.send(Err("pending outgoing bi stream already registered, only call open_bi_stream from a single clone of the connection".into()));
-                                } else {
-                                    info.bi_buf = Some(sender);
+                                OpenBiStream(sender) => {
+                                    if let Some(stream_id) = info
+                                        .connection
+                                        .streams()
+                                        .open(quinn_proto::Dir::Bi)
+                                    {
+                                        sender.send(Ok(
+                                            info.intake_bi(stream_id)
+                                        ));
+                                    } else if info.bi_buf.is_some() {
+                                        sender.send(Err("pending outgoing bi stream already registered, only call open_bi_stream from a single clone of the connection".into()));
+                                    } else {
+                                        info.bi_buf = Some(sender);
+                                    }
                                 }
                             }
                         }
@@ -141,8 +134,13 @@ impl QuinnDriver {
                 while !info.evt_send_buf.is_empty() {
                     match info.evt_send.poll_send(cx) {
                         Poll::Pending => break,
-                        Poll::Ready(Err(_)) => {
-                            info.want_close = true;
+                        Poll::Ready(Err(err)) => {
+                            tracing::error!(?err);
+                            info.evt_closed = true;
+                            while let Some(evt) = info.evt_send_buf.pop_front()
+                            {
+                                drop(evt);
+                            }
                             break;
                         }
                         Poll::Ready(Ok(permit)) => {
@@ -162,21 +160,17 @@ impl QuinnDriver {
                         use quinn_proto::Event::*;
                         match evt {
                             HandshakeDataReady => {
-                                info.evt_send_buf.push_back(
+                                info.push_evt(
                                     ConnectionEvt::HandshakeDataReady,
                                 );
                             }
                             Connected => {
-                                info.evt_send_buf
-                                    .push_back(ConnectionEvt::Connected);
+                                info.push_evt(ConnectionEvt::Connected);
                             }
                             ConnectionLost { reason } => {
-                                info.want_close = true;
-                                info.evt_send_buf.push_back(
-                                    ConnectionEvt::Error(one_err::OneErr::new(
-                                        reason,
-                                    )),
-                                );
+                                let err = one_err::OneErr::new(reason);
+                                tracing::error!(?err);
+                                info.push_evt(ConnectionEvt::Error(err));
                             }
                             Stream(quinn_proto::StreamEvent::Opened {
                                 dir: quinn_proto::Dir::Uni,
@@ -201,13 +195,12 @@ impl QuinnDriver {
                             Stream(quinn_proto::StreamEvent::Finished {
                                 ..
                             }) => {
-                                // check this on poll errors?
-                                /*
-                                if let Some(stream_info) = info.streams.get_mut(&id)
-                                {
-                                    stream_info.rm_both();
-                                }
-                                */
+                                // currently checking every time we loop
+                            }
+                            Stream(quinn_proto::StreamEvent::Stopped {
+                                ..
+                            }) => {
+                                // currently checking every time we loop
                             }
                             Stream(quinn_proto::StreamEvent::Available {
                                 dir: quinn_proto::Dir::Uni,
@@ -245,14 +238,13 @@ impl QuinnDriver {
                                     }
                                 }
                             }
-                            Stream(evt) => panic!("unhandled event: {:?}", evt),
                             DatagramReceived => {
                                 if let Some(dg) =
                                     info.connection.datagrams().recv()
                                 {
-                                    info.evt_send_buf.push_back(
-                                        ConnectionEvt::InDatagram(dg),
-                                    );
+                                    info.push_evt(ConnectionEvt::InDatagram(
+                                        dg,
+                                    ));
                                 }
                             }
                         }
@@ -270,8 +262,7 @@ impl QuinnDriver {
 
                         tracing::debug!(?stream_id, "in read uni stream");
                         let rf = info.intake_uni_in(stream_id);
-                        info.evt_send_buf
-                            .push_back(ConnectionEvt::InUniStream(rf));
+                        info.push_evt(ConnectionEvt::InUniStream(rf));
                     } else {
                         break;
                     }
@@ -285,8 +276,7 @@ impl QuinnDriver {
                         did_con_poll_work = true;
 
                         let (wf, rf) = info.intake_bi(stream_id);
-                        info.evt_send_buf
-                            .push_back(ConnectionEvt::InBiStream(wf, rf));
+                        info.push_evt(ConnectionEvt::InBiStream(wf, rf));
                     } else {
                         break;
                     }
@@ -381,13 +371,17 @@ impl QuinnDriver {
                     loop {
                         match wb.poll_recv(cx) {
                             Poll::Pending => break,
-                            Poll::Ready(cmd) => match cmd {
-                                WriteCmd::Data(mut cmd) => {
-                                    did_work = true;
-                                    match send_stream.write(cmd.as_ref()) {
+                            Poll::Ready(cmd) => {
+                                match cmd {
+                                    WriteCmd::Data(mut cmd) => {
+                                        did_work = true;
+                                        match send_stream.write(cmd.as_ref()) {
                                         Ok(n) => {
                                             use bytes::Buf;
                                             cmd.advance(n);
+                                        }
+                                        Err(quinn_proto::WriteError::Blocked) => {
+                                            break;
                                         }
                                         Err(err) => {
                                             // TODO a way to propagate this
@@ -397,26 +391,27 @@ impl QuinnDriver {
                                             break;
                                         }
                                     }
-                                }
-                                WriteCmd::Stop(error_code) => {
-                                    did_work = true;
-                                    remove = true;
-                                    let code = if let Ok(code) =
-                                        quinn_proto::VarInt::from_u64(
-                                            error_code,
-                                        ) {
-                                        code
-                                    } else {
-                                        quinn_proto::VarInt::from_u32(0)
-                                    };
-                                    if code.into_inner() == 0 {
-                                        let _ = send_stream.finish();
-                                    } else {
-                                        let _ = send_stream.reset(code);
                                     }
-                                    break;
+                                    WriteCmd::Stop(error_code) => {
+                                        did_work = true;
+                                        remove = true;
+                                        let code = if let Ok(code) =
+                                            quinn_proto::VarInt::from_u64(
+                                                error_code,
+                                            ) {
+                                            code
+                                        } else {
+                                            quinn_proto::VarInt::from_u32(0)
+                                        };
+                                        if code.into_inner() == 0 {
+                                            let _ = send_stream.finish();
+                                        } else {
+                                            let _ = send_stream.reset(code);
+                                        }
+                                        break;
+                                    }
                                 }
-                            },
+                            }
                         }
                     }
                 }
@@ -440,7 +435,8 @@ impl QuinnDriver {
                 }
             }
 
-            if info.want_close
+            if info.cmd_closed
+                && info.evt_closed
                 && info.streams.is_empty()
                 && !info.connection.is_closed()
             {
