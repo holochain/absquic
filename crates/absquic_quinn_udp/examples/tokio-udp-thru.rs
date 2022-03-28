@@ -1,3 +1,5 @@
+#![cfg(not(loom))]
+
 use std::sync::atomic;
 use std::sync::Arc;
 

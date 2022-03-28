@@ -1,3 +1,5 @@
+#![cfg(not(loom))]
+
 use absquic_core::connection::*;
 use absquic_core::deps::bytes;
 use absquic_core::endpoint::*;
@@ -6,7 +8,7 @@ use absquic_quinn_udp::*;
 use std::net::SocketAddr;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn main() {
+async fn thru() {
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .with_env_filter(
             tracing_subscriber::filter::EnvFilter::from_default_env(),

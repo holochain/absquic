@@ -9,6 +9,9 @@ one_err = "0.0.5"
 parking_lot = "0.12.0"
 tokio = { version = "1.17.0", features = [ "sync" ] }
 
+[target.'cfg(loom)'.dependencies]
+loom = { version = "0.5.4", features = ["futures", "checkpoint"] }
+
 [dev-dependencies]
 futures = "0.3.21"
 tokio = { version = "1.17.0", features = [ "full" ] }

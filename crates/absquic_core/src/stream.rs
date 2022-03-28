@@ -1,11 +1,12 @@
 //! Absquic_core stream types
 
+use crate::sync::atomic;
+use crate::sync::Arc;
+use crate::sync::Mutex;
 use crate::util::*;
 use crate::AqResult;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic;
-use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
@@ -15,13 +16,29 @@ pub mod backend {
 
     struct CounterInner {
         max: usize,
-        counter: atomic::AtomicUsize,
-        waker: parking_lot::Mutex<Option<std::task::Waker>>,
+        inner: Mutex<(usize, Option<std::task::Waker>)>,
     }
 
     impl CounterInner {
-        fn wake(&self) {
-            if let Some(waker) = self.waker.lock().take() {
+        fn reserve(&self, cx: &mut Context<'_>) -> Option<usize> {
+            let max = self.max;
+            let mut inner = self.inner.lock();
+            let amount = max - inner.0;
+            if amount > 0 {
+                inner.0 = max;
+                Some(amount)
+            } else {
+                inner.1 = Some(cx.waker().clone());
+                None
+            }
+        }
+
+        fn restore(&self, amount: usize) {
+            if let Some(waker) = {
+                let mut inner = self.inner.lock();
+                inner.0 -= amount;
+                inner.1.take()
+            } {
                 waker.wake();
             }
         }
@@ -33,8 +50,7 @@ pub mod backend {
         fn new(max: usize) -> Self {
             Self(Arc::new(CounterInner {
                 max,
-                counter: atomic::AtomicUsize::new(0),
-                waker: parking_lot::Mutex::new(None),
+                inner: Mutex::new((0, None)),
             }))
         }
 
@@ -42,14 +58,9 @@ pub mod backend {
             &self,
             cx: &mut Context<'_>,
         ) -> Option<CounterAddPermit> {
-            let cur = self.0.counter.swap(self.0.max, atomic::Ordering::AcqRel);
-            if cur >= self.0.max {
-                *self.0.waker.lock() = Some(cx.waker().clone());
-                None
-            } else {
-                let amount = self.0.max - cur;
-                Some(CounterAddPermit(self.0.clone(), amount))
-            }
+            self.0
+                .reserve(cx)
+                .map(|amount| CounterAddPermit(self.0.clone(), amount))
         }
     }
 
@@ -57,8 +68,7 @@ pub mod backend {
 
     impl Drop for CounterAddPermit {
         fn drop(&mut self) {
-            self.0.counter.fetch_sub(self.1, atomic::Ordering::AcqRel);
-            self.0.wake();
+            self.0.restore(self.1);
         }
     }
 
@@ -78,8 +88,7 @@ pub mod backend {
 
             let sub = self.1 - new_amount;
             self.1 = new_amount;
-            self.0.counter.fetch_sub(sub, atomic::Ordering::AcqRel);
-            self.0.wake();
+            self.0.restore(sub);
         }
     }
 
@@ -316,7 +325,9 @@ pub mod backend {
                     }
                     Poll::Ready(WriteCmdInner::Stop(error_code, None))
                 }
-                cmd => Poll::Ready(cmd),
+                WriteCmdInner::Data(b, p) => {
+                    Poll::Ready(WriteCmdInner::Data(b, p))
+                }
             }
         }
 
@@ -532,3 +543,6 @@ impl WriteStream {
         })
     }
 }
+
+#[cfg(test)]
+mod loom_tests;

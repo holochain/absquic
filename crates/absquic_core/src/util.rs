@@ -1,10 +1,10 @@
 //! Absquic_core utility types
 
+use crate::sync::Arc;
+use crate::sync::Mutex;
 use crate::*;
-use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
@@ -278,4 +278,34 @@ pub fn channel<T: 'static + Send>(bound: usize) -> (Sender<T>, Receiver<T>) {
     };
     let r = Receiver { receiver: Some(r) };
     (s, r)
+}
+
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use loom::future::block_on;
+    use loom::thread;
+
+    #[test]
+    fn send_starve_and_die() {
+        loom::model(|| {
+            let (mut s, r) = channel(1);
+
+            // clog up the channel
+            let mut s = block_on(async move {
+                s.send().await.unwrap()(1);
+                s
+            });
+
+            let hnd = thread::spawn(move || {
+                block_on(async move {
+                    assert!(s.send().await.is_err());
+                });
+            });
+
+            drop(r);
+
+            hnd.join().unwrap();
+        });
+    }
 }

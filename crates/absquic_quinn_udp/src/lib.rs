@@ -462,5 +462,5 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod test;
