@@ -55,12 +55,10 @@ impl QuinnDriver {
                                     sender.send(Ok(
                                         info.intake_uni_out(stream_id)
                                     ));
+                                } else if info.uni_out_buf.is_some() {
+                                    sender.send(Err("pending outgoing uni stream already registered, only call open_uni_stream from a single clone of the connection".into()));
                                 } else {
-                                    if info.uni_out_buf.is_some() {
-                                        sender.send(Err("pending outgoing uni stream already registered, only call open_uni_stream from a single clone of the connection".into()));
-                                    } else {
-                                        info.uni_out_buf = Some(sender);
-                                    }
+                                    info.uni_out_buf = Some(sender);
                                 }
                             }
                             OpenBiStream(sender) => {
@@ -76,12 +74,10 @@ impl QuinnDriver {
                                     .open(quinn_proto::Dir::Bi)
                                 {
                                     sender.send(Ok(info.intake_bi(stream_id)));
+                                } else if info.bi_buf.is_some() {
+                                    sender.send(Err("pending outgoing bi stream already registered, only call open_bi_stream from a single clone of the connection".into()));
                                 } else {
-                                    if info.bi_buf.is_some() {
-                                        sender.send(Err("pending outgoing bi stream already registered, only call open_bi_stream from a single clone of the connection".into()));
-                                    } else {
-                                        info.bi_buf = Some(sender);
-                                    }
+                                    info.bi_buf = Some(sender);
                                 }
                             }
                         }
@@ -473,18 +469,18 @@ impl QuinnDriver {
         }
 
         if let Some(next_timeout) = next_timeout {
-            if next_timeout > now {
-                if self.next_timeout <= now || next_timeout < self.next_timeout
-                {
-                    self.next_timeout = next_timeout;
-                    let waker = self.waker.clone();
-                    let logic: Box<dyn FnOnce() + 'static + Send> =
-                        Box::new(move || {
-                            tracing::trace!("wake by timeout logic");
-                            waker.wake();
-                        });
-                    self.timeouts_scheduler.schedule(logic, next_timeout);
-                }
+            if next_timeout > now
+                && (self.next_timeout <= now
+                    || next_timeout < self.next_timeout)
+            {
+                self.next_timeout = next_timeout;
+                let waker = self.waker.clone();
+                let logic: Box<dyn FnOnce() + 'static + Send> =
+                    Box::new(move || {
+                        tracing::trace!("wake by timeout logic");
+                        waker.wake();
+                    });
+                self.timeouts_scheduler.schedule(logic, next_timeout);
             }
         }
 

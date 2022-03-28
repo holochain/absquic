@@ -22,6 +22,7 @@ pub enum OneShotKind<T: 'static + Send> {
 
 /// Sender side of a one-shot channel
 pub struct OneShotSender<T: 'static + Send> {
+    #[allow(clippy::type_complexity)]
     send: Option<Box<dyn FnOnce(AqResult<OneShotKind<T>>) + 'static + Send>>,
 }
 
@@ -203,14 +204,14 @@ impl<T: 'static + Send> Sender<T> {
         match std::pin::Pin::new(&mut fut).poll(cx) {
             Poll::Pending => {
                 self.fut = Some(fut);
-                return Poll::Pending;
+                Poll::Pending
             }
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Ready(Ok(permit)) => {
                 let cb: SenderCb<T> = Box::new(move |t| {
                     let _ = permit.send(t);
                 });
-                return Poll::Ready(Ok(cb));
+                Poll::Ready(Ok(cb))
             }
         }
     }

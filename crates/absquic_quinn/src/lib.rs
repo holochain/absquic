@@ -88,6 +88,7 @@ impl QuinnDriverFactory {
 }
 
 impl BackendDriverFactory for QuinnDriverFactory {
+    #[allow(clippy::type_complexity)]
     fn construct_endpoint(
         &self,
         udp_backend: Arc<dyn UdpBackendFactory>,
@@ -161,12 +162,12 @@ enum StreamInfo {
 
 impl StreamInfo {
     fn is_closed(&self) -> bool {
-        match self {
+        matches!(
+            self,
             StreamInfo::UniOut(None)
-            | StreamInfo::UniIn(None)
-            | StreamInfo::Bi(None, None) => true,
-            _ => false,
-        }
+                | StreamInfo::UniIn(None)
+                | StreamInfo::Bi(None, None)
+        )
     }
 
     fn get_read(&mut self) -> Option<&mut ReadStreamBackend> {

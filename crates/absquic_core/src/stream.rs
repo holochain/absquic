@@ -98,6 +98,7 @@ pub mod backend {
         /// Send bytes to the front-end ReadStream.
         /// Err(u64) indicates the error code if the stream was stopped.
         /// This function will panic if data.len() > max_len()
+        #[allow(clippy::comparison_chain)]
         pub fn send(self, data: bytes::Bytes) -> Result<(), u64> {
             let ReadSendPermit { r, mut permit } = self;
 
@@ -110,7 +111,7 @@ pub mod backend {
                 permit.downgrade_to(data_len);
             }
 
-            if let Err(_) = r.send.send(Ok((data, permit))) {
+            if r.send.send(Ok((data, permit))).is_err() {
                 return Err(r.error_code.load(atomic::Ordering::Acquire));
             }
 
@@ -140,10 +141,9 @@ pub mod backend {
         ) -> Poll<ReadSendPermit<'_>> {
             match self.poll_inner(cx) {
                 Poll::Pending => Poll::Pending,
-                Poll::Ready(permit) => Poll::Ready(ReadSendPermit {
-                    r: self,
-                    permit,
-                }),
+                Poll::Ready(permit) => {
+                    Poll::Ready(ReadSendPermit { r: self, permit })
+                }
             }
         }
 
@@ -163,10 +163,7 @@ pub mod backend {
             }
 
             let permit = X(self).await;
-            ReadSendPermit {
-                r: self,
-                permit,
-            }
+            ReadSendPermit { r: self, permit }
         }
 
         fn poll_inner(
@@ -220,7 +217,7 @@ pub mod backend {
         fn drop(&mut self) {
             let b = self.data.take().unwrap();
             let mut p = self.permit.take().unwrap();
-            if b.len() > 0 {
+            if !b.is_empty() {
                 if b.len() < p.len() {
                     p.downgrade_to(b.len());
                 }
@@ -308,7 +305,7 @@ pub mod backend {
                     Poll::Ready(Some(cmd)) => cmd,
                 }
             } {
-                WriteCmdInner::Data(b, _p) if b.len() == 0 => {
+                WriteCmdInner::Data(b, _p) if b.is_empty() => {
                     // tail recurse
                     self.poll_recv_inner(cx)
                 }

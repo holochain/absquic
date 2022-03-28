@@ -161,6 +161,7 @@ impl Future for BackendDriver {
 }
 
 /// Trait defining an absquic backend driver factory
+#[allow(clippy::type_complexity)]
 pub trait BackendDriverFactory: 'static + Send + Sync {
     /// Construct a new endpoint triplet of this type
     fn construct_endpoint(
