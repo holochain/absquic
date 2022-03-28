@@ -1,4 +1,4 @@
-//! types and traits for implementing absquic backends
+//! Types and traits for implementing absquic backends
 
 use crate::endpoint::backend::*;
 use crate::endpoint::*;
@@ -18,19 +18,19 @@ use std::task::Poll;
 /// with the Transmit type in quinn-proto
 #[derive(Debug)]
 pub struct OutUdpPacket {
-    /// destination address
+    /// Destination address
     pub dst_addr: SocketAddr,
 
-    /// source ip
+    /// Source ip
     pub src_ip: Option<IpAddr>,
 
-    /// if this packet contains multiple datagrams
+    /// If this packet contains multiple datagrams
     pub segment_size: Option<usize>,
 
-    /// explicit congestion notification
+    /// Explicit congestion notification
     pub ecn: Option<u8>,
 
-    /// would be nice if this were bytes::BytesMut,
+    /// Would be nice if this were bytes::BytesMut,
     /// but this needs to match the quinn_proto api
     pub data: Vec<u8>,
 }
@@ -38,16 +38,16 @@ pub struct OutUdpPacket {
 /// Incoming Raw Udp Packet Struct
 #[derive(Debug)]
 pub struct InUdpPacket {
-    /// source address
+    /// Source address
     pub src_addr: SocketAddr,
 
-    /// destination ip
+    /// Destination ip
     pub dst_ip: Option<IpAddr>,
 
-    /// explicit congestion notification
+    /// Explicit congestion notification
     pub ecn: Option<u8>,
 
-    /// packet data content
+    /// Packet data content
     pub data: bytes::BytesMut,
 }
 
@@ -92,7 +92,7 @@ impl dyn UdpBackendSender + 'static + Send {
     }
 }
 
-/// trait object udp backend sender
+/// Trait object udp backend sender
 pub type DynUdpBackendSender = Box<dyn UdpBackendSender + 'static + Send>;
 
 /// Trait defining an absquic backend udp implementation
@@ -101,7 +101,7 @@ pub trait UdpBackendReceiver: 'static + Send {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<InUdpPacket>>;
 }
 
-/// trait object udp backend receiver
+/// Trait object udp backend receiver
 pub type DynUdpBackendReceiver = Box<dyn UdpBackendReceiver + 'static + Send>;
 
 impl dyn UdpBackendReceiver + 'static + Send {
@@ -126,7 +126,7 @@ impl dyn UdpBackendReceiver + 'static + Send {
 
 /// Trait defining a factory for udp backends
 pub trait UdpBackendFactory: 'static + Send + Sync {
-    /// bind a new udp backend socket
+    /// Bind a new udp backend socket
     fn bind(
         &self,
     ) -> AqBoxFut<
@@ -140,7 +140,7 @@ pub trait UdpBackendFactory: 'static + Send + Sync {
 pub struct BackendDriver(AqBoxFut<'static, ()>);
 
 impl BackendDriver {
-    /// construct a new absquic backend driver future from a generic future
+    /// Construct a new absquic backend driver future from a generic future
     pub fn new<F>(f: F) -> Self
     where
         F: Future<Output = ()> + 'static + Send,
@@ -162,7 +162,7 @@ impl Future for BackendDriver {
 
 /// Trait defining an absquic backend driver factory
 pub trait BackendDriverFactory: 'static + Send + Sync {
-    /// construct a new endpoint triplet of this type
+    /// Construct a new endpoint triplet of this type
     fn construct_endpoint(
         &self,
         udp_backend: Arc<dyn UdpBackendFactory>,

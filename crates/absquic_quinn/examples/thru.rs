@@ -111,7 +111,7 @@ async fn run_con(name: String, mut con: Connection, rcv: ConnectionRecv) {
                     }
                     all.push(tokio::task::spawn(async move {
                         let mut full_buf = bytes::BytesMut::new();
-                        while let Some(bytes) = r.read_chunk(usize::MAX).await {
+                        while let Some(bytes) = r.read_bytes(usize::MAX).await {
                             let bytes = bytes.unwrap();
                             full_buf.extend_from_slice(bytes.as_ref());
                         }
@@ -139,8 +139,8 @@ async fn run_con(name: String, mut con: Connection, rcv: ConnectionRecv) {
         let mut stream = con.open_uni_stream().await.unwrap();
         all.push(tokio::task::spawn(async move {
             let mut data = (&b"hello"[..]).into();
-            stream.write_chunk_all(&mut data).await.unwrap();
-            stream.finish().await.unwrap();
+            stream.write_bytes_all(&mut data).await.unwrap();
+            stream.stop(0).await.unwrap();
             tracing::info!(
                 "WRITE SUCCESS {}",
                 WRITE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)

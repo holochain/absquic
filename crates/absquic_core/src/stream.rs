@@ -1,4 +1,4 @@
-//! absquic_core stream types
+//! Absquic_core stream types
 
 use crate::util::*;
 use crate::AqResult;
@@ -83,14 +83,40 @@ pub mod backend {
         }
     }
 
-    /// The max length of a bytes authorized for a ReadStreamBackend push
-    pub type ReadMaxSize = usize;
+    /// Permit allowing sending of data to the front-end ReadStream
+    pub struct ReadSendPermit<'lt> {
+        r: &'lt mut ReadStreamBackend,
+        permit: CounterAddPermit,
+    }
 
-    /// A callback allowing data to be pushed into a ReadStreamBackend
-    /// if it returns Err(u64) the u64 is the stream stop error code
-    /// (0 may indicate it was dropped without explicit code)
-    pub type ReadCb =
-        Box<dyn FnOnce(bytes::Bytes) -> Result<(), u64> + 'static + Send>;
+    impl ReadSendPermit<'_> {
+        /// The max length of bytes authorized for send
+        pub fn max_len(&self) -> usize {
+            self.permit.len()
+        }
+
+        /// Send bytes to the front-end ReadStream.
+        /// Err(u64) indicates the error code if the stream was stopped.
+        /// This function will panic if data.len() > max_len()
+        pub fn send(self, data: bytes::Bytes) -> Result<(), u64> {
+            let ReadSendPermit { r, mut permit } = self;
+
+            let data_len = data.len();
+            let permit_len = permit.len();
+
+            if data_len > permit_len {
+                panic!("invalid data length");
+            } else if data_len < permit_len {
+                permit.downgrade_to(data_len);
+            }
+
+            if let Err(_) = r.send.send(Ok((data, permit))) {
+                return Err(r.error_code.load(atomic::Ordering::Acquire));
+            }
+
+            Ok(())
+        }
+    }
 
     /// The backend of a ReadStream, allows publishing data to the api user
     pub struct ReadStreamBackend {
@@ -103,65 +129,55 @@ pub mod backend {
 
     impl ReadStreamBackend {
         /// Shutdown this read stream with given error
-        pub fn close_with_error(self, err: one_err::OneErr) {
+        pub fn stop(self, err: one_err::OneErr) {
             let _ = self.send.send(Err(err));
         }
 
         /// Request to push data into the read stream
-        /// if it returns Err(u64) the u64 is the stream stop error code
-        /// (0 may indicate it was dropped without explicit code)
-        pub fn poll_supply_data(
+        pub fn poll_send(
             &mut self,
             cx: &mut Context<'_>,
-        ) -> Poll<Result<(ReadMaxSize, ReadCb), u64>> {
-            if self.send.is_closed() {
-                return Poll::Ready(Err(self
-                    .error_code
-                    .load(atomic::Ordering::Acquire)));
-            }
-            if let Some(mut permit) = self.counter.reserve(cx) {
-                let sender = self.send.clone();
-                let max_size = permit.len();
-                let error_code = self.error_code.clone();
-                let read_cb: ReadCb = Box::new(move |mut b| {
-                    if b.len() > max_size {
-                        b = b.split_to(max_size);
-                    } else if b.len() < max_size {
-                        permit.downgrade_to(b.len());
-                    }
-                    match sender.send(Ok((b, permit))) {
-                        Ok(_) => Ok(()),
-                        Err(_) => {
-                            Err(error_code.load(atomic::Ordering::Acquire))
-                        }
-                    }
-                });
-                Poll::Ready(Ok((max_size, read_cb)))
-            } else {
-                Poll::Pending
+        ) -> Poll<ReadSendPermit<'_>> {
+            match self.poll_inner(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(permit) => Poll::Ready(ReadSendPermit {
+                    r: self,
+                    permit,
+                }),
             }
         }
 
         /// Request to push data into the read stream
-        /// if it returns Err(u64) the u64 is the stream stop error code
-        /// (0 may indicate it was dropped without explicit code)
-        pub async fn supply_data(
-            &mut self,
-        ) -> Result<(ReadMaxSize, ReadCb), u64> {
+        pub async fn send(&mut self) -> ReadSendPermit<'_> {
             struct X<'lt>(&'lt mut ReadStreamBackend);
 
             impl<'lt> Future for X<'lt> {
-                type Output = Result<(ReadMaxSize, ReadCb), u64>;
+                type Output = CounterAddPermit;
 
                 fn poll(
                     mut self: Pin<&mut Self>,
                     cx: &mut Context<'_>,
                 ) -> Poll<Self::Output> {
-                    self.0.poll_supply_data(cx)
+                    self.0.poll_inner(cx)
                 }
             }
 
-            X(self).await
+            let permit = X(self).await;
+            ReadSendPermit {
+                r: self,
+                permit,
+            }
+        }
+
+        fn poll_inner(
+            &mut self,
+            cx: &mut Context<'_>,
+        ) -> Poll<CounterAddPermit> {
+            if let Some(permit) = self.counter.reserve(cx) {
+                Poll::Ready(permit)
+            } else {
+                Poll::Pending
+            }
         }
     }
 
@@ -253,16 +269,16 @@ pub mod backend {
 
     /// Incoming command from the frontend write stream
     pub enum WriteCmd<'lt> {
-        /// Data sent over the write channel
-        /// this guard can dereference to a `&mut bytes::Bytes`
-        /// you call pull off as much or little data as you like
+        /// Data sent over the write channel.
+        /// This guard can dereference to a `&mut bytes::Bytes`.
+        /// You call pull off as much or little data as you like
         /// when the guard is dropped, the sender side will be notified
-        /// of any additional space available from bytes pulled off.
+        /// of any additional space available from bytes pulled off
         Data(WriteCmdData<'lt>),
 
-        /// This write channel has been stopped with error_code
+        /// This write channel has been stopped with error_code,
         /// no more data will be forthcoming. If error_code is 0,
-        /// it may indicate the fontend side was dropped.
+        /// it may indicate the fontend side was dropped
         Stop(u64),
     }
 
@@ -386,10 +402,10 @@ pub struct ReadStream {
 
 impl ReadStream {
     /// Read a chunk of data from the stream
-    pub fn poll_read_chunk(
+    pub fn poll_read_bytes(
         &mut self,
         cx: &mut Context<'_>,
-        max_bytes: usize,
+        max_len: usize,
     ) -> Poll<Option<AqResult<bytes::Bytes>>> {
         if self.buf.is_none() {
             match self.recv.poll_recv(cx) {
@@ -400,26 +416,26 @@ impl ReadStream {
             }
         }
 
-        if max_bytes == 0 {
+        if max_len == 0 {
             return Poll::Ready(Some(Ok(bytes::Bytes::new())));
         }
 
         let (mut b, mut p) = self.buf.take().unwrap();
 
-        if b.len() <= max_bytes {
+        if b.len() <= max_len {
             Poll::Ready(Some(Ok(b)))
         } else {
-            let out = b.split_to(max_bytes);
-            p.downgrade_to(max_bytes);
+            let out = b.split_to(max_len);
+            p.downgrade_to(max_len);
             self.buf = Some((b, p));
             Poll::Ready(Some(Ok(out)))
         }
     }
 
     /// Read a chunk of data from the stream
-    pub async fn read_chunk(
+    pub async fn read_bytes(
         &mut self,
-        max_bytes: usize,
+        max_len: usize,
     ) -> Option<AqResult<bytes::Bytes>> {
         struct X<'lt>(&'lt mut ReadStream, usize);
 
@@ -430,12 +446,12 @@ impl ReadStream {
                 mut self: Pin<&mut Self>,
                 cx: &mut Context<'_>,
             ) -> Poll<Self::Output> {
-                let max_bytes = self.1;
-                self.0.poll_read_chunk(cx, max_bytes)
+                let max_len = self.1;
+                self.0.poll_read_bytes(cx, max_len)
             }
         }
 
-        X(self, max_bytes).await
+        X(self, max_len).await
     }
 
     /// Cancel the stream with given error code
@@ -452,20 +468,20 @@ pub struct WriteStream {
 
 impl WriteStream {
     /// Write data to the stream
-    pub fn poll_write_chunk(
+    pub fn poll_write_bytes(
         &mut self,
         cx: &mut Context<'_>,
-        chunk: &mut bytes::Bytes,
+        data: &mut bytes::Bytes,
     ) -> Poll<AqResult<()>> {
         match self.counter.reserve(cx) {
             None => Poll::Pending,
             Some(mut permit) => {
-                let b = if chunk.len() >= permit.len() {
-                    chunk.split_to(permit.len())
+                let b = if data.len() >= permit.len() {
+                    data.split_to(permit.len())
                 } else {
-                    let len = chunk.len();
+                    let len = data.len();
                     permit.downgrade_to(len);
-                    chunk.split_to(len)
+                    data.split_to(len)
                 };
                 self.send
                     .send(WriteCmdInner::Data(b, permit))
@@ -476,9 +492,9 @@ impl WriteStream {
     }
 
     /// Write data to the stream
-    pub async fn write_chunk(
+    pub async fn write_bytes(
         &mut self,
-        chunk: &mut bytes::Bytes,
+        data: &mut bytes::Bytes,
     ) -> AqResult<()> {
         struct X<'lt1, 'lt2>(&'lt1 mut WriteStream, &'lt2 mut bytes::Bytes);
 
@@ -490,20 +506,20 @@ impl WriteStream {
                 cx: &mut Context<'_>,
             ) -> Poll<Self::Output> {
                 let X(s, b) = &mut *self;
-                s.poll_write_chunk(cx, b)
+                s.poll_write_bytes(cx, b)
             }
         }
 
-        X(self, chunk).await
+        X(self, data).await
     }
 
     /// Write data completely to the stream
-    pub async fn write_chunk_all(
+    pub async fn write_bytes_all(
         &mut self,
-        chunk: &mut bytes::Bytes,
+        data: &mut bytes::Bytes,
     ) -> AqResult<()> {
-        while !chunk.is_empty() {
-            self.write_chunk(chunk).await?;
+        while !data.is_empty() {
+            self.write_bytes(data).await?;
         }
         Ok(())
     }

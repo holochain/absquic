@@ -1,4 +1,4 @@
-//! helper utilities to aid in development
+//! Helper utilities to aid in development
 
 use once_cell::sync::Lazy;
 use std::sync::Arc;
@@ -12,12 +12,12 @@ static LOCAL_EPHEM_CERT: Lazy<(rustls::Certificate, rustls::PrivateKey)> =
         (cert, pk)
     });
 
-/// get the "localhost" ephemeral self signed tls certificate
+/// Get the "localhost" ephemeral self signed tls certificate
 pub fn local_ephem_tls_cert() -> (rustls::Certificate, rustls::PrivateKey) {
     LOCAL_EPHEM_CERT.clone()
 }
 
-/// get a simple server config based on a single cert / private key
+/// Get a simple server config based on a single cert / private key
 pub fn simple_server_config(
     cert: rustls::Certificate,
     pk: rustls::PrivateKey,
@@ -25,7 +25,7 @@ pub fn simple_server_config(
     quinn_proto::ServerConfig::with_single_cert(vec![cert], pk).unwrap()
 }
 
-/// get a trusting client config that accepts all certificates
+/// Get a trusting client config that accepts all certificates
 pub fn trusting_client_config() -> quinn_proto::ClientConfig {
     let client_config = rustls::ClientConfig::builder()
         .with_safe_defaults()

@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 #![deny(warnings)]
 #![deny(unsafe_code)]
-//! absquic udp backend implementation backed by quinn-udp
+//! Absquic udp backend implementation backed by quinn-udp
 
 use absquic_core::backend::*;
 use absquic_core::deps::{bytes, one_err};
@@ -371,9 +371,11 @@ impl UdpBackendSender for Sender {
         OneShotReceiver::new(async move {
             let (s, r) = util::one_shot_channel();
             sender
-                .send(DriverCmd::LocalAddr(s))
+                .send()
                 .await
-                .map_err(|_| one_err::OneErr::new("SocketClosed"))?;
+                .map_err(|_| one_err::OneErr::new("SocketClosed"))?(
+                DriverCmd::LocalAddr(s),
+            );
             Ok(OneShotKind::Value(r.await?))
         })
     }
@@ -411,7 +413,7 @@ pub struct QuinnUdpBackendFactory {
 }
 
 impl QuinnUdpBackendFactory {
-    /// construct a new quinn udp backend factory
+    /// Construct a new quinn udp backend factory
     pub fn new(addr: SocketAddr, max_udp_size: Option<usize>) -> Self {
         let max_udp_size = max_udp_size.unwrap_or_default();
         Self {

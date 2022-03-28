@@ -1,4 +1,4 @@
-//! absquic_core utility types
+//! Absquic_core utility types
 
 use crate::*;
 use parking_lot::Mutex;
@@ -34,7 +34,7 @@ impl<T: 'static + Send> Drop for OneShotSender<T> {
 }
 
 impl<T: 'static + Send> OneShotSender<T> {
-    /// construct a new one shot sender from a generic closure
+    /// Construct a new one shot sender from a generic closure
     pub fn new<F>(f: F) -> Self
     where
         F: FnOnce(AqResult<OneShotKind<T>>) + 'static + Send,
@@ -44,7 +44,7 @@ impl<T: 'static + Send> OneShotSender<T> {
         }
     }
 
-    /// send the item to the receiver side of this channel
+    /// Send the item to the receiver side of this channel
     pub fn send(mut self, r: AqResult<T>) {
         if let Some(send) = self.send.take() {
             match r {
@@ -54,8 +54,8 @@ impl<T: 'static + Send> OneShotSender<T> {
         }
     }
 
-    /// forward a different one shot receiver's result to
-    /// the receiver attached to *this* one shot sender.
+    /// Forward a different one shot receiver's result to
+    /// the receiver attached to *this* one shot sender
     pub fn forward(mut self, oth: OneShotReceiver<T>) {
         if let Some(send) = self.send.take() {
             send(Ok(OneShotKind::Forward(oth.recv)));
@@ -81,7 +81,7 @@ impl<T: 'static + Send> Future for OneShotReceiver<T> {
 }
 
 impl<T: 'static + Send> OneShotReceiver<T> {
-    /// construct a new one shot receiver from a generic future
+    /// Construct a new one shot receiver from a generic future
     pub fn new<F>(f: F) -> Self
     where
         F: Future<Output = AqResult<OneShotKind<T>>> + 'static + Send,
@@ -89,17 +89,17 @@ impl<T: 'static + Send> OneShotReceiver<T> {
         Self { recv: Box::pin(f) }
     }
 
-    /// extract the inner boxed future, useful for forwarding
+    /// Extract the inner boxed future, useful for forwarding
     pub fn into_inner(self) -> OneShotFut<T> {
         self.recv
     }
 
-    /// forward the result of this receiver to a different one shot sender
+    /// Forward the result of this receiver to a different one shot sender
     pub fn forward(self, oth: OneShotSender<T>) {
         oth.forward(self)
     }
 
-    /// future-aware poll receive function
+    /// Future-aware poll receive function
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<AqResult<T>> {
         match std::pin::Pin::new(&mut self.recv).poll(cx) {
             Poll::Pending => Poll::Pending,
@@ -114,7 +114,7 @@ impl<T: 'static + Send> OneShotReceiver<T> {
     }
 }
 
-/// create a one-shot channel sender / receiver pair
+/// Create a one-shot channel sender / receiver pair
 pub fn one_shot_channel<T: 'static + Send>(
 ) -> (OneShotSender<T>, OneShotReceiver<T>) {
     let (s, r) = tokio::sync::oneshot::channel::<AqResult<OneShotKind<T>>>();
@@ -131,13 +131,13 @@ pub fn one_shot_channel<T: 'static + Send>(
     )
 }
 
-/// sender side of a data channel
+/// Sender side of a data channel
 pub struct Sender<T: 'static + Send> {
     sender: Option<Arc<Mutex<Option<tokio::sync::mpsc::Sender<T>>>>>,
     fut: Option<AqBoxFut<'static, AqResult<tokio::sync::mpsc::OwnedPermit<T>>>>,
 }
 
-/// sender send callback type
+/// Sender send callback type
 pub type SenderCb<T> = Box<dyn FnOnce(T) + 'static + Send>;
 
 impl<T: 'static + Send> Clone for Sender<T> {
@@ -161,7 +161,7 @@ impl<T: 'static + Send> Sender<T> {
         Err("ChannelClosed".into())
     }
 
-    /// close this channel from the sender side
+    /// Close this channel from the sender side
     pub fn close(&mut self) {
         drop(self.fut.take());
         if let Some(inner) = &self.sender {
@@ -170,7 +170,7 @@ impl<T: 'static + Send> Sender<T> {
         drop(self.sender.take());
     }
 
-    /// check if this channel is closed
+    /// Check if this channel is closed
     pub fn is_closed(&self) -> bool {
         if let Some(inner) = &self.sender {
             let inner = inner.lock();
@@ -181,7 +181,7 @@ impl<T: 'static + Send> Sender<T> {
         true
     }
 
-    /// attempt to send data on this channel
+    /// Attempt to send data on this channel
     pub fn poll_send(
         &mut self,
         cx: &mut Context<'_>,
@@ -215,8 +215,8 @@ impl<T: 'static + Send> Sender<T> {
         }
     }
 
-    /// attempt to send data on this channel
-    pub async fn send(&mut self, t: T) -> AqResult<()> {
+    /// Attempt to send data on this channel
+    pub async fn send(&mut self) -> AqResult<SenderCb<T>> {
         struct X<'lt, T: 'static + Send>(&'lt mut Sender<T>);
 
         impl<'lt, T: 'static + Send> Future for X<'lt, T> {
@@ -230,19 +230,17 @@ impl<T: 'static + Send> Sender<T> {
             }
         }
 
-        let cb = X(self).await?;
-        cb(t);
-        Ok(())
+        X(self).await
     }
 }
 
-/// receiver side of a data channel
+/// Receiver side of a data channel
 pub struct Receiver<T: 'static + Send> {
     receiver: Option<tokio::sync::mpsc::Receiver<T>>,
 }
 
 impl<T: 'static + Send> Receiver<T> {
-    /// receive data from this channel
+    /// Receive data from this channel
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         if let Some(r) = &mut self.receiver {
             r.poll_recv(cx)
@@ -251,7 +249,7 @@ impl<T: 'static + Send> Receiver<T> {
         }
     }
 
-    /// receive data from this channel
+    /// Receive data from this channel
     pub async fn recv(&mut self) -> Option<T> {
         struct X<'lt, T: 'static + Send>(&'lt mut Receiver<T>);
 
@@ -270,7 +268,7 @@ impl<T: 'static + Send> Receiver<T> {
     }
 }
 
-/// create a new data channel sender receiver pair
+/// Create a new data channel sender receiver pair
 pub fn channel<T: 'static + Send>(bound: usize) -> (Sender<T>, Receiver<T>) {
     let (s, r) = tokio::sync::mpsc::channel(bound);
     let s = Sender {

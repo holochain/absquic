@@ -9,7 +9,7 @@
 //! # #[tokio::main(flavor = "multi_thread")]
 //! # async fn main() {
 //! use absquic::*;
-//! use absquic_quinn::*;
+//! use absquic_quinn::dev_utils;
 //!
 //! // get a in-process cached local self-signed ephemeral tls certificate pair
 //! let (cert, pk) = dev_utils::local_ephem_tls_cert();
@@ -52,12 +52,9 @@
 //! # }
 //! ```
 
-/// re-exported dependencies
+/// Re-exported dependencies
 pub mod deps {
     pub use absquic_core;
-    pub use absquic_core::deps::bytes;
-    pub use absquic_core::deps::one_err;
-    pub use absquic_core::deps::parking_lot;
 
     #[cfg(feature = "absquic_quinn")]
     pub use absquic_quinn;

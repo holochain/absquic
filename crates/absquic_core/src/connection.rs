@@ -1,27 +1,27 @@
-//! absquic_core connection types
+//! Absquic_core connection types
 
 use crate::stream::*;
 use crate::util::*;
 use crate::AqResult;
 use std::net::SocketAddr;
 
-/// types only relevant when implementing a quic state machine backend
+/// Types only relevant when implementing a quic state machine backend
 pub mod backend {
     use super::*;
 
-    /// send a control command to the connection backend implementation
+    /// Send a control command to the connection backend implementation
     pub enum ConnectionCmd {
-        /// get the remote address of this connection
+        /// Get the remote address of this connection
         GetRemoteAddress(OneShotSender<SocketAddr>),
 
-        /// open a new outgoing uni-directional stream
+        /// Open a new outgoing uni-directional stream
         OpenUniStream(OneShotSender<WriteStream>),
 
-        /// open a new outgoing bi-directional stream
+        /// Open a new outgoing bi-directional stream
         OpenBiStream(OneShotSender<(WriteStream, ReadStream)>),
     }
 
-    /// as a backend library, construct an absquic connection instance
+    /// As a backend library, construct an absquic connection instance
     pub fn construct_connection(
         command_sender: Sender<ConnectionCmd>,
         event_receiver: Receiver<ConnectionEvt>,
@@ -32,24 +32,24 @@ pub mod backend {
 
 use backend::*;
 
-/// events related to a quic connection
+/// Events related to a quic connection
 pub enum ConnectionEvt {
-    /// connection error, the connection will no longer function
+    /// Connection error, the connection will no longer function
     Error(one_err::OneErr),
 
-    /// handshake data is read
+    /// Handshake data is read
     HandshakeDataReady,
 
-    /// connection established
+    /// Connection established
     Connected,
 
-    /// incoming uni-directional stream
+    /// Incoming uni-directional stream
     InUniStream(ReadStream),
 
-    /// incoming bi-directional stream
+    /// Incoming bi-directional stream
     InBiStream(WriteStream, ReadStream),
 
-    /// incoming un-ordered datagram
+    /// Incoming un-ordered datagram
     InDatagram(bytes::Bytes),
 }
 
@@ -76,26 +76,26 @@ impl Receiver<ConnectionEvt> {
 pub struct Connection(Sender<ConnectionCmd>);
 
 impl Connection {
-    /// the current address associated with the remote side of this connection
+    /// The current address associated with the remote side of this connection
     pub async fn remote_address(&mut self) -> AqResult<SocketAddr> {
         let (s, r) = one_shot_channel();
-        self.0.send(ConnectionCmd::GetRemoteAddress(s)).await?;
+        self.0.send().await?(ConnectionCmd::GetRemoteAddress(s));
         r.await
     }
 
-    /// open a new outgoing uni-directional stream
+    /// Open a new outgoing uni-directional stream
     pub async fn open_uni_stream(&mut self) -> AqResult<WriteStream> {
         let (s, r) = one_shot_channel();
-        self.0.send(ConnectionCmd::OpenUniStream(s)).await?;
+        self.0.send().await?(ConnectionCmd::OpenUniStream(s));
         r.await
     }
 
-    /// open a new outgoing bi-directional stream
+    /// Open a new outgoing bi-directional stream
     pub async fn open_bi_stream(
         &mut self,
     ) -> AqResult<(WriteStream, ReadStream)> {
         let (s, r) = one_shot_channel();
-        self.0.send(ConnectionCmd::OpenBiStream(s)).await?;
+        self.0.send().await?(ConnectionCmd::OpenBiStream(s));
         r.await
     }
 }

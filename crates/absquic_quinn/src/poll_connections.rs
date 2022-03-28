@@ -305,6 +305,7 @@ impl QuinnDriver {
 
             for (stream_id, stream_info) in info.streams.iter_mut() {
                 let mut remove = false;
+                let mut stop_err = None;
 
                 if let Some(rb) = stream_info.get_read() {
                     let mut stop_code = None;
@@ -318,22 +319,17 @@ impl QuinnDriver {
                         }
                         Ok(mut chunks) => {
                             loop {
-                                let (read_max, read_cb) =
-                                    match rb.poll_supply_data(cx) {
-                                        Poll::Pending => break,
-                                        Poll::Ready(Err(code)) => {
-                                            did_work = true;
-                                            remove = true;
-                                            stop_code = Some(code);
-                                            break;
-                                        }
-                                        Poll::Ready(Ok(r)) => r,
-                                    };
-                                match chunks.next(read_max) {
+                                let permit = match rb.poll_send(cx) {
+                                    Poll::Pending => break,
+                                    Poll::Ready(p) => p,
+                                };
+                                match chunks.next(permit.max_len()) {
                                     Err(quinn_proto::ReadError::Blocked) => {
                                         break
                                     }
-                                    Err(_) => {
+                                    Err(err) => {
+                                        stop_err =
+                                            Some(one_err::OneErr::new(err));
                                         did_work = true;
                                         remove = true;
                                         break;
@@ -346,11 +342,14 @@ impl QuinnDriver {
                                     Ok(Some(chunk)) => {
                                         did_work = true;
 
-                                        if chunk.bytes.len() > read_max {
+                                        if chunk.bytes.len() > permit.max_len()
+                                        {
                                             panic!("unexpected large chunk");
                                         }
 
-                                        if let Err(code) = read_cb(chunk.bytes) {
+                                        if let Err(code) =
+                                            permit.send(chunk.bytes)
+                                        {
                                             remove = true;
                                             stop_code = Some(code);
                                             break;
@@ -375,7 +374,7 @@ impl QuinnDriver {
 
                 if remove {
                     tracing::debug!(?stream_id, "remove read stream");
-                    stream_info.rm_read()
+                    stream_info.rm_read(stop_err)
                 }
 
                 remove = false;
@@ -384,41 +383,44 @@ impl QuinnDriver {
                     let mut send_stream =
                         info.connection.send_stream(*stream_id);
                     loop {
-                        match wb.poll_incoming(cx, |b| {
-                            let res = send_stream
-                                .write(b.as_ref())
-                                .map_err(|e| one_err::OneErr::new(e))?;
-                            use absquic_core::deps::bytes::Buf;
-                            b.advance(res);
-                            Ok(())
-                        }) {
+                        match wb.poll_recv(cx) {
                             Poll::Pending => break,
-                            Poll::Ready(Err(_)) => {
-                                did_work = true;
-                                remove = true;
-                                break;
-                            }
-                            Poll::Ready(Ok(cmd)) => {
-                                did_work = true;
-                                match cmd {
-                                    WriteCmd::Data => (),
-                                    WriteCmd::Reset(error_code) => {
-                                        let _ = send_stream.reset(
-                                            quinn_proto::VarInt::from_u64(
-                                                error_code,
-                                            )
-                                            .map_err(one_err::OneErr::new)?,
-                                        );
-                                        remove = true;
-                                        break;
-                                    }
-                                    WriteCmd::Finish => {
-                                        let _ = send_stream.finish();
-                                        remove = true;
-                                        break;
+                            Poll::Ready(cmd) => match cmd {
+                                WriteCmd::Data(mut cmd) => {
+                                    did_work = true;
+                                    match send_stream.write(cmd.as_ref()) {
+                                        Ok(n) => {
+                                            use bytes::Buf;
+                                            cmd.advance(n);
+                                        }
+                                        Err(err) => {
+                                            // TODO a way to propagate this
+                                            // error up to the implementor
+                                            tracing::error!(?err);
+                                            remove = true;
+                                            break;
+                                        }
                                     }
                                 }
-                            }
+                                WriteCmd::Stop(error_code) => {
+                                    did_work = true;
+                                    remove = true;
+                                    let code = if let Ok(code) =
+                                        quinn_proto::VarInt::from_u64(
+                                            error_code,
+                                        ) {
+                                        code
+                                    } else {
+                                        quinn_proto::VarInt::from_u32(0)
+                                    };
+                                    if code.into_inner() == 0 {
+                                        let _ = send_stream.finish();
+                                    } else {
+                                        let _ = send_stream.reset(code);
+                                    }
+                                    break;
+                                }
+                            },
                         }
                     }
                 }

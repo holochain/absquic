@@ -1,4 +1,4 @@
-//! absquic_core endpoint types
+//! Absquic_core endpoint types
 
 use crate::backend::*;
 use crate::connection::*;
@@ -7,24 +7,24 @@ use crate::AqResult;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-/// types only relevant when implementing a quic state machine backend
+/// Types only relevant when implementing a quic state machine backend
 pub mod backend {
     use super::*;
 
-    /// send a control command to the endpoint backend implementation
+    /// Send a control command to the endpoint backend implementation
     pub enum EndpointCmd {
-        /// get the local addr this endpoint is bound to
+        /// Get the local addr this endpoint is bound to
         GetLocalAddress(OneShotSender<SocketAddr>),
 
-        /// attempt to establish a new outgoing connection
+        /// Attempt to establish a new outgoing connection
         Connect {
-            /// resp sender for the result of the connection attempt
+            /// Resp sender for the result of the connection attempt
             sender: OneShotSender<(Connection, ConnectionRecv)>,
 
-            /// the address to connect to
+            /// The address to connect to
             addr: SocketAddr,
 
-            /// the server name to connect to
+            /// The server name to connect to
             server_name: String,
         },
     }
@@ -32,11 +32,11 @@ pub mod backend {
 
 use backend::*;
 
-/// helper logic to plug in periodic scheduling into arbitrary runtime
+/// Helper logic to plug in periodic scheduling into arbitrary runtime
 pub trait TimeoutsScheduler: 'static + Send {
-    /// schedule logic to be invoked at instant
-    /// if previous logic has been scheduled but not yet triggered,
-    /// it is okay to drop that previous logic without triggering.
+    /// Schedule logic to be invoked at instant.
+    /// If previous logic has been scheduled but not yet triggered,
+    /// it is okay to drop that previous logic without triggering
     fn schedule(
         &mut self,
         logic: Box<dyn FnOnce() + 'static + Send>,
@@ -44,12 +44,12 @@ pub trait TimeoutsScheduler: 'static + Send {
     );
 }
 
-/// events related to a quic endpoint
+/// Events related to a quic endpoint
 pub enum EndpointEvt {
-    /// endpoint error, the endpoint will no longer function
+    /// Endpoint error, the endpoint will no longer function
     Error(one_err::OneErr),
 
-    /// incoming connection
+    /// Incoming connection
     InConnection(Connection, ConnectionRecv),
 }
 
@@ -61,39 +61,37 @@ pub type EndpointRecv = Receiver<EndpointEvt>;
 pub struct Endpoint(Sender<EndpointCmd>);
 
 impl Endpoint {
-    /// the current address this endpoint is bound to
+    /// The current address this endpoint is bound to
     pub async fn local_address(&mut self) -> AqResult<SocketAddr> {
         let (s, r) = one_shot_channel();
-        self.0.send(EndpointCmd::GetLocalAddress(s)).await?;
+        self.0.send().await?(EndpointCmd::GetLocalAddress(s));
         r.await
     }
 
-    /// attempt to establish a new outgoing connection
+    /// Attempt to establish a new outgoing connection
     pub async fn connect(
         &mut self,
         addr: SocketAddr,
         server_name: &str,
     ) -> AqResult<(Connection, ConnectionRecv)> {
         let (s, r) = one_shot_channel();
-        self.0
-            .send(EndpointCmd::Connect {
-                sender: s,
-                addr,
-                server_name: server_name.to_string(),
-            })
-            .await?;
+        self.0.send().await?(EndpointCmd::Connect {
+            sender: s,
+            addr,
+            server_name: server_name.to_string(),
+        });
         r.await
     }
 }
 
-/// a factory that can construct absquic endpoints
+/// A factory that can construct absquic endpoints
 pub struct EndpointFactory {
     udp_backend: Arc<dyn UdpBackendFactory>,
     quic_backend: Arc<dyn BackendDriverFactory>,
 }
 
 impl EndpointFactory {
-    /// construct a new endpoint factory
+    /// Construct a new endpoint factory
     pub fn new<U, D>(udp_backend: U, backend_driver: D) -> Self
     where
         U: UdpBackendFactory,
@@ -108,7 +106,7 @@ impl EndpointFactory {
         }
     }
 
-    /// bind a new endpoint from this factory
+    /// Bind a new endpoint from this factory
     pub async fn bind<S>(
         &self,
         timeouts_scheduler: S,

@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 #![deny(warnings)]
 #![deny(unsafe_code)]
-//! absquic backend powered by quinn-proto
+//! Absquic backend powered by quinn-proto
 
 use absquic_core::backend::*;
 use absquic_core::connection::backend::*;
@@ -21,16 +21,16 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
-/// re-exported dependencies
+/// Re-exported dependencies
 pub mod deps {
     pub use absquic_core;
     pub use quinn_proto;
     pub use rustls;
 }
 
+pub use quinn_proto::ClientConfig as QuinnClientConfig;
 pub use quinn_proto::EndpointConfig as QuinnEndpointConfig;
 pub use quinn_proto::ServerConfig as QuinnServerConfig;
-pub use quinn_proto::ClientConfig as QuinnClientConfig;
 
 pub mod dev_utils;
 
@@ -65,7 +65,7 @@ impl WakerSlot {
     }
 }
 
-/// absquic backend powered by quinn-proto
+/// Absquic backend powered by quinn-proto
 pub struct QuinnDriverFactory {
     endpoint_config: Arc<quinn_proto::EndpointConfig>,
     server_config: Option<Arc<quinn_proto::ServerConfig>>,
@@ -73,7 +73,7 @@ pub struct QuinnDriverFactory {
 }
 
 impl QuinnDriverFactory {
-    /// construct a new absquic driver factory backed by quinn-proto
+    /// Construct a new absquic driver factory backed by quinn-proto
     pub fn new(
         endpoint_config: QuinnEndpointConfig,
         server_config: Option<QuinnServerConfig>,
@@ -134,11 +134,11 @@ impl BackendDriverFactory for QuinnDriverFactory {
 
 #[derive(Clone, Copy)]
 enum Disposition {
-    /// it's safe to return pending, i.e. we have wakers registered
+    /// It's safe to return pending, i.e. we have wakers registered
     /// everywhere needed to ensure continued function of the driver
     PendOk,
 
-    /// we need another poll loop to continue safely
+    /// We need another poll loop to continue safely
     MoreWork,
 }
 
@@ -177,11 +177,15 @@ impl StreamInfo {
         }
     }
 
-    fn rm_read(&mut self) {
-        match self {
-            StreamInfo::UniOut(_) => (),
-            StreamInfo::UniIn(r) => *r = None,
-            StreamInfo::Bi(_, r) => *r = None,
+    fn rm_read(&mut self, stop_err: Option<one_err::OneErr>) {
+        if let Some(rb) = match self {
+            StreamInfo::UniOut(_) => None,
+            StreamInfo::UniIn(rb) => rb.take(),
+            StreamInfo::Bi(_, rb) => rb.take(),
+        } {
+            if let Some(stop_err) = stop_err {
+                rb.stop(stop_err);
+            }
         }
     }
 
