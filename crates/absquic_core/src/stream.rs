@@ -10,6 +10,8 @@ use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
 
+pub mod buf_list;
+
 /// types only relevant when implementing a quic state machine backend
 pub mod backend {
     use super::*;
@@ -459,6 +461,25 @@ impl ReadStream {
         }
 
         X(self, max_len).await
+    }
+
+    /// Read all data until this stream ends, up to max_len
+    pub async fn read_to_end(
+        mut self,
+        mut max_len: usize,
+    ) -> AqResult<buf_list::BufList<bytes::Bytes>> {
+        let mut out = buf_list::BufList::new();
+        while max_len > 0 {
+            match self.read_bytes(max_len).await {
+                None => break,
+                Some(Err(e)) => return Err(e),
+                Some(Ok(data)) => {
+                    max_len -= data.len();
+                    out.push_back(data);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Cancel the stream with given error code
