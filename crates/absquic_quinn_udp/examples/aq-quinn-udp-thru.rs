@@ -1,5 +1,3 @@
-#![cfg(not(loom))]
-
 use absquic_core::backend::*;
 use absquic_quinn_udp::*;
 use std::sync::atomic;

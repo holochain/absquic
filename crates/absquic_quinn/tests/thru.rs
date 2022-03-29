@@ -20,7 +20,7 @@ async fn thru() {
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
     let endpoint_config = quinn_proto::EndpointConfig::default();
-    let (cert, pk) = dev_utils::local_ephem_tls_cert();
+    let (cert, pk) = dev_utils::localhost_self_signed_tls_cert();
     let server_config = dev_utils::simple_server_config(cert, pk);
     let client_config = dev_utils::trusting_client_config();
 

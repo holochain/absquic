@@ -12,7 +12,7 @@
 //! use absquic_quinn::dev_utils;
 //!
 //! // get a in-process cached local self-signed ephemeral tls certificate pair
-//! let (cert, pk) = dev_utils::local_ephem_tls_cert();
+//! let (cert, pk) = dev_utils::localhost_self_signed_tls_cert();
 //!
 //! // construct a new endpoint factory using the quinn backend types
 //! let endpoint_factory = EndpointFactory::new(

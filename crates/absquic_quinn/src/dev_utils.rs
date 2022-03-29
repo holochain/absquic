@@ -1,20 +1,15 @@
 //! Helper utilities to aid in development
 
-use once_cell::sync::Lazy;
 use std::sync::Arc;
 
-static LOCAL_EPHEM_CERT: Lazy<(rustls::Certificate, rustls::PrivateKey)> =
-    Lazy::new(|| {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
-            .unwrap();
-        let pk = rustls::PrivateKey(cert.serialize_private_key_der());
-        let cert = rustls::Certificate(cert.serialize_der().unwrap());
-        (cert, pk)
-    });
-
 /// Get the "localhost" ephemeral self signed tls certificate
-pub fn local_ephem_tls_cert() -> (rustls::Certificate, rustls::PrivateKey) {
-    LOCAL_EPHEM_CERT.clone()
+pub fn localhost_self_signed_tls_cert(
+) -> (rustls::Certificate, rustls::PrivateKey) {
+    let cert =
+        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let pk = rustls::PrivateKey(cert.serialize_private_key_der());
+    let cert = rustls::Certificate(cert.serialize_der().unwrap());
+    (cert, pk)
 }
 
 /// Get a simple server config based on a single cert / private key

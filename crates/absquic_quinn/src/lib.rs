@@ -50,6 +50,7 @@ pub use quinn_proto::ClientConfig as QuinnClientConfig;
 pub use quinn_proto::EndpointConfig as QuinnEndpointConfig;
 pub use quinn_proto::ServerConfig as QuinnServerConfig;
 
+#[cfg(feature = "dev_utils")]
 pub mod dev_utils;
 
 static UNIQ: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
