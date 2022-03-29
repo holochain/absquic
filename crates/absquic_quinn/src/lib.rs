@@ -21,6 +21,24 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
+#[cfg(trace_timing)]
+mod trace_timing {
+    pub(crate) struct TraceTiming(std::time::Instant);
+
+    impl Default for TraceTiming {
+        fn default() -> Self {
+            Self(std::time::Instant::now())
+        }
+    }
+
+    impl Drop for TraceTiming {
+        fn drop(&mut self) {
+            let elapsed_us = self.0.elapsed().as_micros();
+            tracing::trace!(%elapsed_us, "TraceTiming");
+        }
+    }
+}
+
 /// Re-exported dependencies
 pub mod deps {
     pub use absquic_core;
@@ -295,6 +313,9 @@ impl Future for QuinnDriver {
     ) -> Poll<Self::Output> {
         let _span = tracing::error_span!("poll", uniq = ?self._uniq).entered();
 
+        #[cfg(trace_timing)]
+        let _tt = trace_timing::TraceTiming::default();
+
         match self.poll_inner(cx) {
             Err(e) => {
                 tracing::error!("{:?}", e);
@@ -335,7 +356,9 @@ impl QuinnDriver {
     pub fn poll_inner(&mut self, cx: &mut Context<'_>) -> AqResult<Poll<()>> {
         self.waker.set(cx.waker().clone());
 
-        for _ in 0..32 {
+        let start = std::time::Instant::now();
+
+        loop {
             // first poll the udp driver --
             // if we don't have a udp driver we don't have an endpoint
             match std::pin::Pin::new(&mut self.udp_driver).poll(cx) {
@@ -366,6 +389,12 @@ impl QuinnDriver {
                     return Ok(Poll::Pending);
                 }
                 Disposition::MoreWork => (),
+            }
+
+            // if we're trying to keep under the 20 ms mark,
+            // we don't want to start another loop if we're already over 10
+            if start.elapsed() >= std::time::Duration::from_millis(10) {
+                break;
             }
         }
 

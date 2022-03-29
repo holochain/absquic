@@ -2,6 +2,16 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_udp() {
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_env_filter(
+            tracing_subscriber::filter::EnvFilter::from_default_env(),
+        )
+        .with_file(true)
+        .with_line_number(true)
+        .without_time()
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
     let factory = QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
 
     let (mut s1, r1, d1) = factory.bind().await.unwrap();

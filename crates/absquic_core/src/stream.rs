@@ -315,7 +315,6 @@ pub mod backend {
                 }
             } {
                 WriteCmdInner::Data(b, _p) if b.is_empty() => {
-                    // tail recurse
                     self.poll_recv_inner(cx)
                 }
                 WriteCmdInner::Stop(error_code, send) => {

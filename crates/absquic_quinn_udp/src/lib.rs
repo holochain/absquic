@@ -14,6 +14,24 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
+#[cfg(trace_timing)]
+mod trace_timing {
+    pub(crate) struct TraceTiming(std::time::Instant);
+
+    impl Default for TraceTiming {
+        fn default() -> Self {
+            Self(std::time::Instant::now())
+        }
+    }
+
+    impl Drop for TraceTiming {
+        fn drop(&mut self) {
+            let elapsed_us = self.0.elapsed().as_micros();
+            tracing::trace!(%elapsed_us, "TraceTiming");
+        }
+    }
+}
+
 const BATCH_SIZE: usize = quinn_udp::BATCH_SIZE;
 
 enum DriverCmd {
@@ -118,6 +136,9 @@ impl Driver {
     }
 
     pub fn poll_inner(&mut self, cx: &mut Context<'_>) -> AqResult<Poll<()>> {
+        #[cfg(trace_timing)]
+        let _tt = trace_timing::TraceTiming::default();
+
         for _ in 0..32 {
             // order matters significantly here
             // consider carefully before changing

@@ -108,7 +108,6 @@ impl<T: 'static + Send> OneShotReceiver<T> {
             Poll::Ready(Ok(OneShotKind::Value(t))) => Poll::Ready(Ok(t)),
             Poll::Ready(Ok(OneShotKind::Forward(fut))) => {
                 self.recv = fut;
-                // this should tail recurse, right?
                 self.poll_recv(cx)
             }
         }
