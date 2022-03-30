@@ -37,12 +37,9 @@ pub type AqResult<T> = std::result::Result<T, one_err::OneErr>;
 pub type AqBoxFut<'lt, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'lt + Send>>;
 
-pub mod util;
-
-pub mod stream;
-
-pub mod connection;
-
-pub mod endpoint;
-
 pub mod backend;
+pub mod connection;
+pub mod endpoint;
+pub mod runtime;
+pub mod stream;
+pub mod util;

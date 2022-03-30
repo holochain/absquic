@@ -182,6 +182,18 @@ impl<T: 'static + Send> Sender<T> {
     }
 
     /// Attempt to send data on this channel
+    pub fn try_send(&mut self) -> AqResult<Option<SenderCb<T>>> {
+        let sender = self.get_sender()?;
+        match sender.try_reserve_owned() {
+            Ok(permit) => Ok(Some(Box::new(move |t| {
+                let _ = permit.send(t);
+            }))),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(None),
+            Err(e) => Err(one_err::OneErr::new(e)),
+        }
+    }
+
+    /// Attempt to send data on this channel
     pub fn poll_send(
         &mut self,
         cx: &mut Context<'_>,
@@ -286,7 +298,42 @@ mod loom_tests {
     use loom::thread;
 
     #[test]
-    fn send_starve_and_die() {
+    fn one_shot_sanity() {
+        loom::model(|| {
+            let (s, r) = one_shot_channel();
+
+            let hnd = thread::spawn(move || {
+                block_on(async move {
+                    s.send(Ok(42));
+                });
+            });
+
+            assert!(matches!(block_on(r), Ok(42)));
+
+            hnd.join().unwrap();
+        })
+    }
+
+    #[test]
+    fn one_shot_send_close() {
+        loom::model(|| {
+            let (s, r) = one_shot_channel::<isize>();
+            drop(s);
+            assert!(block_on(r).is_err());
+        })
+    }
+
+    #[test]
+    fn one_shot_recv_close() {
+        loom::model(|| {
+            let (s, r) = one_shot_channel::<isize>();
+            drop(r);
+            s.send(Ok(42));
+        })
+    }
+
+    #[test]
+    fn chan_send_starve_and_die() {
         loom::model(|| {
             let (mut s, r) = channel(1);
 
