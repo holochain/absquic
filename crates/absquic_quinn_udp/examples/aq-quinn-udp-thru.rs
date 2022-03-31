@@ -1,3 +1,4 @@
+/*
 use absquic_core::backend::*;
 use absquic_quinn_udp::*;
 use std::sync::atomic;
@@ -137,3 +138,6 @@ async fn main() {
         (recv_count as f64 / send_count as f64 * 100.0)
     );
 }
+*/
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {}

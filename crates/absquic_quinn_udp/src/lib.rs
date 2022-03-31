@@ -4,6 +4,115 @@
 //! Absquic udp backend implementation backed by quinn-udp
 
 use absquic_core::backend::*;
+use absquic_core::deps::bytes;
+use absquic_core::*;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
+
+struct Front {
+    Receiver<UdpBackendCmd>,
+    Receiver<OutUdpPacket>,
+    Sender<UdpBackendEvt>
+}
+
+impl Front {
+    fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+        tx: &mut VecDeque<quinn_proto::Transmit>,
+        rx: &mut VecDeque<InUdpPacket>,
+    ) -> Poll<AqResult<()>> {
+    }
+}
+
+struct Back {
+    state: Arc<quinn_udp::UdpState>,
+    socket: quinn_udp::UdpSocket,
+    read_bufs_raw: [bytes::BytesMut; quinn_udp::BATCH_SIZE],
+    read_meta_raw: [quinn_udp::RecvMeta; quinn_udp::BATCH_SIZE],
+}
+
+impl Back {
+    fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+        tx: &mut VecDeque<quinn_proto::Transmit>,
+        rx: &mut VecDeque<InUdpPacket>,
+    ) -> Poll<AqResult<()>> {
+        let Wrapper { state, socket, read_bufs_raw, read_meta_raw } = self;
+
+        let mut did_work = false;
+
+        if !tx.is_empty() {
+            tx.make_contiguous();
+            match socket.poll_send(&state, cx, tx.as_slices().0) {
+                Poll::Pending => (),
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(e.into()))
+                }
+                Poll::Ready(Ok(n)) => {
+                    did_work = true;
+                    tx.drain(..n);
+                }
+            }
+        }
+
+        if rx.is_empty() {
+            let mut bufs = read_bufs_raw
+                .iter_mut()
+                .map(|b| std::io::IoSliceMut::new(b.as_mut()))
+                .collect::<Vec<_>>();
+            match socket.poll_recv(
+                cx,
+                &mut bufs,
+                read_meta_raw,
+            )
+            {
+                Poll::Pending => (),
+                Poll::Ready(Err(ref e))
+                    if e.kind() == std::io::ErrorKind::ConnectionReset =>
+                {
+                    did_work = true;
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+                Poll::Ready(Ok(msg_count)) => {
+                    did_work = true;
+
+                    if msg_count == 0 {
+                        // this should hopefully be unreachable,
+                        // but just in case, return the error
+                        return Poll::Ready(Err("bad udp recv poll".into()));
+                    }
+
+                    for (meta, buf) in
+                        read_meta_raw.iter().zip(read_bufs_raw.iter()).take(msg_count)
+                    {
+                        let buf = buf[0..meta.len].into();
+                        let packet = InUdpPacket {
+                            src_addr: meta.addr,
+                            dst_ip: meta.dst_ip,
+                            ecn: meta.ecn.map(|ecn| ecn as u8),
+                            data: buf,
+                        };
+                        rx.push_back(packet);
+                    }
+                }
+            }
+
+        }
+
+        if did_work {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+/*
+use absquic_core::backend::*;
 use absquic_core::deps::{bytes, one_err};
 use absquic_core::util::*;
 use absquic_core::*;
@@ -485,3 +594,4 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
 
 #[cfg(all(test, not(loom)))]
 mod test;
+*/

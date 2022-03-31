@@ -5,11 +5,9 @@ edition = "2021"
 
 [dependencies]
 bytes = "1.1.0"
+futures-core = { version = "0.3.21", default-features = false }
 one_err = "0.0.5"
 parking_lot = "0.12.0"
-# TODO - would be nice to use something more generic / light weight
-#        we've tried to keep the api agnostic so we can change this out
-tokio = { version = "1.17.0", features = [ "sync" ] }
 
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.5.4", features = ["futures", "checkpoint"] }

@@ -2,14 +2,11 @@
 
 use crate::endpoint::backend::*;
 use crate::endpoint::*;
+use crate::runtime::*;
 use crate::util::*;
 use crate::*;
-use std::future::Future;
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::task::Context;
-use std::task::Poll;
 
 /// Outgoing Raw Udp Packet Struct
 ///
@@ -51,125 +48,45 @@ pub struct InUdpPacket {
     pub data: bytes::BytesMut,
 }
 
-/// Trait defining an absquic backend udp implementation
-pub trait UdpBackendSender: 'static + Send {
-    /// Get the local address of this backend udp socket
-    fn local_addr(&mut self) -> OneShotReceiver<SocketAddr>;
-
-    /// Get the recommended batch size for this backend udp socket
-    fn batch_size(&self) -> usize;
-
-    /// Get the max Generic Send Offload (GSO) segments
-    /// usable by this backend, this value can change on gso errors
-    fn max_gso_segments(&self) -> usize;
-
-    /// Send data through this backend udp socket
-    fn poll_send(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<AqResult<SenderCb<OutUdpPacket>>>;
+/// Incoming commands for the udp backend
+pub enum UdpBackendCmd {
+    /// Get the local address currently associated with the udp backend
+    GetLocalAddress(OneShotSender<SocketAddr>),
 }
 
-impl dyn UdpBackendSender + 'static + Send {
-    /// Send data through this backend udp socket
-    pub async fn send(&mut self, data: OutUdpPacket) -> AqResult<()> {
-        struct X<'lt>(&'lt mut (dyn UdpBackendSender + 'static + Send));
-
-        impl<'lt> Future for X<'lt> {
-            type Output = AqResult<SenderCb<OutUdpPacket>>;
-
-            fn poll(
-                mut self: std::pin::Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<Self::Output> {
-                self.0.poll_send(cx)
-            }
-        }
-
-        let cb = X(self).await?;
-        cb(data);
-        Ok(())
-    }
+/// Events emitted by the udp backend
+pub enum UdpBackendEvt {
+    /// The udp backend has received an incoming udp packet
+    InUdpPacket(InUdpPacket),
 }
 
-/// Trait object udp backend sender
-pub type DynUdpBackendSender = Box<dyn UdpBackendSender + 'static + Send>;
-
-/// Trait defining an absquic backend udp implementation
-pub trait UdpBackendReceiver: 'static + Send {
-    /// Recv data from this backend udp socket
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<InUdpPacket>>;
-}
-
-/// Trait object udp backend receiver
-pub type DynUdpBackendReceiver = Box<dyn UdpBackendReceiver + 'static + Send>;
-
-impl dyn UdpBackendReceiver + 'static + Send {
-    /// Recv data from this backend udp socket
-    pub async fn recv(&mut self) -> Option<InUdpPacket> {
-        struct X<'lt>(&'lt mut (dyn UdpBackendReceiver + 'static + Send));
-
-        impl<'lt> Future for X<'lt> {
-            type Output = Option<InUdpPacket>;
-
-            fn poll(
-                mut self: std::pin::Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<Self::Output> {
-                self.0.poll_recv(cx)
-            }
-        }
-
-        X(self).await
-    }
-}
-
-/// Trait defining a factory for udp backends
+/// A factory type for binding udp backends
 pub trait UdpBackendFactory: 'static + Send + Sync {
     /// Bind a new udp backend socket
-    fn bind(
+    fn bind<R>(
         &self,
-    ) -> AqBoxFut<
+        runtime: R,
+    ) -> AqFut<
         'static,
-        AqResult<(DynUdpBackendSender, DynUdpBackendReceiver, BackendDriver)>,
-    >;
-}
-
-/// An absquic backend driver future
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct BackendDriver(AqBoxFut<'static, ()>);
-
-impl BackendDriver {
-    /// Construct a new absquic backend driver future from a generic future
-    pub fn new<F>(f: F) -> Self
+        AqResult<(
+            Sender<UdpBackendCmd>,
+            Sender<OutUdpPacket>,
+            Receiver<UdpBackendEvt>,
+        )>,
+    >
     where
-        F: Future<Output = ()> + 'static + Send,
-    {
-        Self(Box::pin(f))
-    }
-}
-
-impl Future for BackendDriver {
-    type Output = ();
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
-        Future::poll(self.0.as_mut(), cx)
-    }
+        R: AsyncRuntime;
 }
 
 /// Trait defining an absquic backend driver factory
-#[allow(clippy::type_complexity)]
-pub trait BackendDriverFactory: 'static + Send + Sync {
-    /// Construct a new endpoint triplet of this type
-    fn construct_endpoint(
+pub trait QuicBackendFactory: 'static + Send + Sync {
+    /// Bind a new endpoint of this type
+    fn bind<R, U>(
         &self,
-        udp_backend: Arc<dyn UdpBackendFactory>,
-        timeouts_scheduler: Box<dyn TimeoutsScheduler>,
-    ) -> AqBoxFut<
-        'static,
-        AqResult<(Sender<EndpointCmd>, Receiver<EndpointEvt>, BackendDriver)>,
-    >;
+        runtime: R,
+        udp_backend: U,
+    ) -> AqFut<'static, AqResult<(Sender<EndpointCmd>, Receiver<EndpointEvt>)>>
+    where
+        R: AsyncRuntime,
+        U: UdpBackendFactory;
 }

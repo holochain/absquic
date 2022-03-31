@@ -1,5 +1,6 @@
 //! Absquic_core stream types
 
+use crate::runtime::*;
 use crate::sync::atomic;
 use crate::sync::Arc;
 use crate::sync::Mutex;
@@ -133,9 +134,7 @@ pub mod backend {
     /// The backend of a ReadStream, allows publishing data to the api user
     pub struct ReadStreamBackend {
         counter: Counter,
-        send: tokio::sync::mpsc::UnboundedSender<
-            AqResult<(bytes::Bytes, CounterAddPermit)>,
-        >,
+        send: Sender<(bytes::Bytes, CounterAddPermit)>,
         error_code: Arc<atomic::AtomicU64>,
     }
 
@@ -190,14 +189,14 @@ pub mod backend {
     }
 
     /// Construct a new read stream backend and frontend pair
-    pub fn read_stream_pair(
+    pub fn read_stream_pair<R: AsyncRuntime>(
+        r: &R,
         buf_size: usize,
     ) -> (ReadStreamBackend, ReadStream) {
         let error_code = Arc::new(atomic::AtomicU64::new(0));
         let counter = Counter::new(buf_size);
-        // unbounded ok, because we're using Counter to set a bound
-        // on the outstanding byte count sent over the channel
-        let (send, recv) = tokio::sync::mpsc::unbounded_channel();
+        // allow buf_size one byte buffers as an upper bound??
+        let (send, recv) = r.channel(buf_size);
         (
             ReadStreamBackend {
                 counter,
@@ -292,7 +291,7 @@ pub mod backend {
 
     /// The backend of a write stream, allows collecting the written data
     pub struct WriteStreamBackend {
-        recv: tokio::sync::mpsc::UnboundedReceiver<WriteCmdInner>,
+        recv: Receiver<WriteCmdInner>,
         buf: Option<WriteCmdInner>,
         error_code: u64,
     }
@@ -380,13 +379,14 @@ pub mod backend {
     }
 
     /// Construct a new write stream backend and frontend pair
-    pub fn write_stream_pair(
+    pub fn write_stream_pair<R: AsyncRuntime>(
+        r: &R,
         buf_size: usize,
     ) -> (WriteStreamBackend, WriteStream) {
         let counter = Counter::new(buf_size);
-        // unbounded ok, because we're using Counter to set a bound
-        // on the outstanding byte count sent over the channel
-        let (send, recv) = tokio::sync::mpsc::unbounded_channel();
+
+        // allow buf_size one byte buffers as an upper bound??
+        let (send, recv) = r.channel(buf_size);
         (
             WriteStreamBackend {
                 recv,
@@ -402,9 +402,7 @@ use backend::*;
 
 /// Quic read stream
 pub struct ReadStream {
-    recv: tokio::sync::mpsc::UnboundedReceiver<
-        AqResult<(bytes::Bytes, CounterAddPermit)>,
-    >,
+    recv: Receiver<(bytes::Bytes, CounterAddPermit)>,
     buf: Option<(bytes::Bytes, CounterAddPermit)>,
     error_code: Arc<atomic::AtomicU64>,
 }
@@ -491,7 +489,7 @@ impl ReadStream {
 /// Quic write stream
 pub struct WriteStream {
     counter: Counter,
-    send: tokio::sync::mpsc::UnboundedSender<WriteCmdInner>,
+    send: Sender<WriteCmdInner>,
 }
 
 impl WriteStream {
