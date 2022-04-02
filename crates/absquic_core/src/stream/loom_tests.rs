@@ -1,12 +1,13 @@
 use super::*;
 use crate::sync::block_on;
 use crate::sync::thread;
+use crate::tokio_runtime::TokioRuntime;
 use bytes::Buf;
 
 fn write_stream_front_drop_inner() {
     const DATA: &[u8] = b"hello world!";
 
-    let (mut back, mut front) = write_stream_pair(3);
+    let (mut back, mut front) = write_stream_pair::<TokioRuntime>(3);
 
     let hnd = thread::spawn(move || {
         block_on(async move {
@@ -59,7 +60,7 @@ fn loom_write_stream_front_drop() {
 fn write_stream_back_drop_inner() {
     const DATA: &[u8] = b"abc";
 
-    let (mut back, mut front) = write_stream_pair(3);
+    let (mut back, mut front) = write_stream_pair::<TokioRuntime>(3);
 
     let hnd = thread::spawn(move || {
         block_on(async move {
@@ -112,13 +113,13 @@ fn loom_write_stream_back_drop() {
 fn read_stream_front_drop_inner() {
     const DATA: &[u8] = b"abc";
 
-    let (mut back, mut front) = read_stream_pair(3);
+    let (mut back, mut front) = read_stream_pair::<TokioRuntime>(3);
 
     let hnd = thread::spawn(move || {
         block_on(async move {
             loop {
-                match back.send().await.send(bytes::Bytes::from_static(DATA)) {
-                    Ok(_) => (),
+                match back.acquire().await {
+                    Ok(sender) => sender.send(bytes::Bytes::from_static(DATA)),
                     Err(_) => break,
                 }
             }
@@ -158,18 +159,18 @@ fn loom_read_stream_front_drop() {
 fn read_stream_back_drop_inner() {
     const DATA: &[u8] = b"hello world!";
 
-    let (mut back, mut front) = read_stream_pair(3);
+    let (mut back, mut front) = read_stream_pair::<TokioRuntime>(3);
 
     let hnd = thread::spawn(move || {
         block_on(async move {
             let mut to_send = bytes::Bytes::from_static(DATA);
             while !to_send.is_empty() {
-                let permit = back.send().await;
-                let max_len = permit.max_len();
-                match permit.send(to_send.split_to(max_len)) {
-                    Ok(_) => (),
+                let permit = match back.acquire().await {
+                    Ok(permit) => permit,
                     Err(_) => panic!("unexpected send failure"),
-                }
+                };
+                let max_len = permit.max_len();
+                permit.send(to_send.split_to(max_len));
             }
         });
     });

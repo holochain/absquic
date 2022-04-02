@@ -2,8 +2,8 @@
 
 use crate::backend::*;
 use crate::connection::*;
-use crate::util::*;
-use crate::AqResult;
+use crate::runtime::*;
+use crate::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -14,12 +14,12 @@ pub mod backend {
     /// Send a control command to the endpoint backend implementation
     pub enum EndpointCmd {
         /// Get the local addr this endpoint is bound to
-        GetLocalAddress(OneShotSender<SocketAddr>),
+        GetLocalAddress(OnceSender<SocketAddr>),
 
         /// Attempt to establish a new outgoing connection
         Connect {
             /// Resp sender for the result of the connection attempt
-            sender: OneShotSender<(Connection, ConnectionRecv)>,
+            sender: OnceSender<(Connection, MultiReceiver<ConnectionEvt>)>,
 
             /// The address to connect to
             addr: SocketAddr,
@@ -32,40 +32,64 @@ pub mod backend {
 
 use backend::*;
 
-/// Helper logic to plug in periodic scheduling into arbitrary runtime
-pub trait TimeoutsScheduler: 'static + Send {
-    /// Schedule logic to be invoked at instant.
-    /// If previous logic has been scheduled but not yet triggered,
-    /// it is okay to drop that previous logic without triggering
-    fn schedule(
-        &mut self,
-        logic: Box<dyn FnOnce() + 'static + Send>,
-        at: std::time::Instant,
-    );
-}
-
 /// Events related to a quic endpoint
 pub enum EndpointEvt {
     /// Endpoint error, the endpoint will no longer function
     Error(one_err::OneErr),
 
     /// Incoming connection
-    InConnection(Connection, ConnectionRecv),
+    InConnection(Connection, MultiReceiver<ConnectionEvt>),
 }
 
-/// Receive events related to a specific quic endpoint instance
-pub type EndpointRecv = Receiver<EndpointEvt>;
+type OnceChan<T> = Arc<
+    dyn Fn() -> (OnceSender<T>, AqFut<'static, Option<T>>) + 'static + Send,
+>;
 
 /// A handle to a quic endpoint
 #[derive(Clone)]
-pub struct Endpoint(Sender<EndpointCmd>);
+pub struct Endpoint {
+    cmd_send: MultiSender<EndpointCmd>,
+
+    // these handles let us avoid having the runtime generic on this type
+    one_shot_socket_addr: OnceChan<SocketAddr>,
+    one_shot_connect: OnceChan<(Connection, MultiReceiver<ConnectionEvt>)>,
+}
 
 impl Endpoint {
+    /// Construct a new absquic endpoint
+    pub async fn new<Runtime, Udp, Quic>(
+        udp_backend: Udp,
+        quic_backend: Quic,
+    ) -> AqResult<(Self, MultiReceiver<EndpointEvt>)>
+    where
+        Runtime: AsyncRuntime,
+        Udp: UdpBackendFactory,
+        Quic: QuicBackendFactory,
+    {
+        let (cmd_send, evt_recv) =
+            quic_backend.bind::<Runtime, _>(udp_backend).await?;
+
+        let one_shot_socket_addr = Arc::new(|| Runtime::one_shot());
+        let one_shot_connect = Arc::new(|| Runtime::one_shot());
+
+        Ok((
+            Self {
+                cmd_send,
+                one_shot_socket_addr,
+                one_shot_connect,
+            },
+            evt_recv,
+        ))
+    }
+
     /// The current address this endpoint is bound to
-    pub async fn local_address(&mut self) -> AqResult<SocketAddr> {
-        let (s, r) = one_shot_channel();
-        self.0.send().await?(EndpointCmd::GetLocalAddress(s));
-        r.await
+    pub async fn local_address(&mut self) -> ChanResult<SocketAddr> {
+        let (s, r) = (self.one_shot_socket_addr)();
+        self.cmd_send
+            .acquire()
+            .await?
+            .send(EndpointCmd::GetLocalAddress(s));
+        r.await.ok_or(ChannelClosed)
     }
 
     /// Attempt to establish a new outgoing connection
@@ -73,53 +97,13 @@ impl Endpoint {
         &mut self,
         addr: SocketAddr,
         server_name: &str,
-    ) -> AqResult<(Connection, ConnectionRecv)> {
-        let (s, r) = one_shot_channel();
-        self.0.send().await?(EndpointCmd::Connect {
+    ) -> ChanResult<(Connection, MultiReceiver<ConnectionEvt>)> {
+        let (s, r) = (self.one_shot_connect)();
+        self.cmd_send.acquire().await?.send(EndpointCmd::Connect {
             sender: s,
             addr,
             server_name: server_name.to_string(),
         });
-        r.await
-    }
-}
-
-/// A factory that can construct absquic endpoints
-pub struct EndpointFactory {
-    udp_backend: Arc<dyn UdpBackendFactory>,
-    quic_backend: Arc<dyn BackendDriverFactory>,
-}
-
-impl EndpointFactory {
-    /// Construct a new endpoint factory
-    pub fn new<U, D>(udp_backend: U, backend_driver: D) -> Self
-    where
-        U: UdpBackendFactory,
-        D: BackendDriverFactory,
-    {
-        let udp_backend: Arc<dyn UdpBackendFactory> = Arc::new(udp_backend);
-        let quic_backend: Arc<dyn BackendDriverFactory> =
-            Arc::new(backend_driver);
-        Self {
-            udp_backend,
-            quic_backend,
-        }
-    }
-
-    /// Bind a new endpoint from this factory
-    pub async fn bind<S>(
-        &self,
-        timeouts_scheduler: S,
-    ) -> AqResult<(Endpoint, EndpointRecv, BackendDriver)>
-    where
-        S: TimeoutsScheduler,
-    {
-        let timeouts_scheduler: Box<dyn TimeoutsScheduler> =
-            Box::new(timeouts_scheduler);
-        let (cmd_send, evt_recv, driver) = self
-            .quic_backend
-            .construct_endpoint(self.udp_backend.clone(), timeouts_scheduler)
-            .await?;
-        Ok((Endpoint(cmd_send), evt_recv, driver))
+        r.await.ok_or(ChannelClosed)
     }
 }

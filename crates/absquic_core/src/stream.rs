@@ -1,10 +1,12 @@
+#![allow(clippy::type_complexity)]
+#![allow(clippy::comparison_chain)]
 //! Absquic_core stream types
 
+use crate::runtime::*;
 use crate::sync::atomic;
 use crate::sync::Arc;
 use crate::sync::Mutex;
-use crate::util::*;
-use crate::AqResult;
+use crate::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::Context;
@@ -96,7 +98,8 @@ pub mod backend {
 
     /// Permit allowing sending of data to the front-end ReadStream
     pub struct ReadSendPermit<'lt> {
-        r: &'lt mut ReadStreamBackend,
+        _r: &'lt mut ReadStreamBackend,
+        sender: OnceSender<AqResult<(bytes::Bytes, CounterAddPermit)>>,
         permit: CounterAddPermit,
     }
 
@@ -107,11 +110,13 @@ pub mod backend {
         }
 
         /// Send bytes to the front-end ReadStream.
-        /// Err(u64) indicates the error code if the stream was stopped.
         /// This function will panic if data.len() > max_len()
-        #[allow(clippy::comparison_chain)]
-        pub fn send(self, data: bytes::Bytes) -> Result<(), u64> {
-            let ReadSendPermit { r, mut permit } = self;
+        pub fn send(self, data: bytes::Bytes) {
+            let ReadSendPermit {
+                _r,
+                sender,
+                mut permit,
+            } = self;
 
             let data_len = data.len();
             let permit_len = permit.len();
@@ -122,48 +127,66 @@ pub mod backend {
                 permit.downgrade_to(data_len);
             }
 
-            if r.send.send(Ok((data, permit))).is_err() {
-                return Err(r.error_code.load(atomic::Ordering::Acquire));
-            }
-
-            Ok(())
+            sender.send(Ok((data, permit)));
         }
     }
 
     /// The backend of a ReadStream, allows publishing data to the api user
     pub struct ReadStreamBackend {
         counter: Counter,
-        send: tokio::sync::mpsc::UnboundedSender<
-            AqResult<(bytes::Bytes, CounterAddPermit)>,
-        >,
+        send: MultiSender<AqResult<(bytes::Bytes, CounterAddPermit)>>,
+        sender: Option<OnceSender<AqResult<(bytes::Bytes, CounterAddPermit)>>>,
         error_code: Arc<atomic::AtomicU64>,
     }
 
     impl ReadStreamBackend {
         /// Shutdown this read stream with given error
-        pub fn stop(self, err: one_err::OneErr) {
-            let _ = self.send.send(Err(err));
+        pub fn stop(self, err: one_err::OneErr) -> AqFut<'static, ()> {
+            let ReadStreamBackend { send, .. } = self;
+            AqFut::new(async move {
+                let fut = {
+                    let fut = send.acquire();
+                    drop(send);
+                    fut
+                };
+                if let Ok(sender) = fut.await {
+                    sender.send(Err(err));
+                }
+            })
         }
 
-        /// Request to push data into the read stream
-        pub fn poll_send(
+        /// Request to push data into the read stream.
+        /// Err(u64) indicates the error code if the stream was stopped
+        pub fn poll_acquire(
             &mut self,
             cx: &mut Context<'_>,
-        ) -> Poll<ReadSendPermit<'_>> {
+        ) -> Poll<Result<ReadSendPermit<'_>, u64>> {
             match self.poll_inner(cx) {
                 Poll::Pending => Poll::Pending,
-                Poll::Ready(permit) => {
-                    Poll::Ready(ReadSendPermit { r: self, permit })
+                Poll::Ready(Err(code)) => Poll::Ready(Err(code)),
+                Poll::Ready(Ok((sender, permit))) => {
+                    Poll::Ready(Ok(ReadSendPermit {
+                        _r: self,
+                        sender,
+                        permit,
+                    }))
                 }
             }
         }
 
-        /// Request to push data into the read stream
-        pub async fn send(&mut self) -> ReadSendPermit<'_> {
+        /// Request to push data into the read stream.
+        /// Err(u64) indicates the error code if the stream was stopped
+        pub async fn acquire(&mut self) -> Result<ReadSendPermit<'_>, u64> {
             struct X<'lt>(&'lt mut ReadStreamBackend);
 
             impl<'lt> Future for X<'lt> {
-                type Output = CounterAddPermit;
+                type Output = Result<
+                    (
+                        OnceSender<AqResult<(bytes::Bytes, CounterAddPermit)>>,
+                        CounterAddPermit,
+                    ),
+                    u64,
+                >;
 
                 fn poll(
                     mut self: Pin<&mut Self>,
@@ -173,35 +196,64 @@ pub mod backend {
                 }
             }
 
-            let permit = X(self).await;
-            ReadSendPermit { r: self, permit }
+            let (sender, permit) = X(self).await?;
+            Ok(ReadSendPermit {
+                _r: self,
+                sender,
+                permit,
+            })
         }
 
         fn poll_inner(
             &mut self,
             cx: &mut Context<'_>,
-        ) -> Poll<CounterAddPermit> {
-            if let Some(permit) = self.counter.reserve(cx) {
-                Poll::Ready(permit)
+        ) -> Poll<
+            Result<
+                (
+                    OnceSender<AqResult<(bytes::Bytes, CounterAddPermit)>>,
+                    CounterAddPermit,
+                ),
+                u64,
+            >,
+        > {
+            let sender = if let Some(sender) = self.sender.take() {
+                sender
             } else {
+                match self.send.poll_acquire(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(_)) => {
+                        let code =
+                            self.error_code.load(atomic::Ordering::Acquire);
+                        return Poll::Ready(Err(code));
+                    }
+                    Poll::Ready(Ok(sender)) => sender,
+                }
+            };
+
+            if let Some(permit) = self.counter.reserve(cx) {
+                Poll::Ready(Ok((sender, permit)))
+            } else {
+                self.sender = Some(sender);
                 Poll::Pending
             }
         }
     }
 
     /// Construct a new read stream backend and frontend pair
-    pub fn read_stream_pair(
+    pub fn read_stream_pair<Runtime: AsyncRuntime>(
         buf_size: usize,
     ) -> (ReadStreamBackend, ReadStream) {
         let error_code = Arc::new(atomic::AtomicU64::new(0));
         let counter = Counter::new(buf_size);
-        // unbounded ok, because we're using Counter to set a bound
-        // on the outstanding byte count sent over the channel
-        let (send, recv) = tokio::sync::mpsc::unbounded_channel();
+        // if we're sending less than 8 byte chunks, we probably
+        // deserve to be limited
+        let chan_size = std::cmp::max(8, buf_size / 8);
+        let (send, recv) = Runtime::channel(chan_size);
         (
             ReadStreamBackend {
                 counter,
                 send,
+                sender: None,
                 error_code: error_code.clone(),
             },
             ReadStream {
@@ -214,7 +266,7 @@ pub mod backend {
 
     pub(crate) enum WriteCmdInner {
         Data(bytes::Bytes, CounterAddPermit),
-        Stop(u64, Option<OneShotSender<()>>),
+        Stop(u64, Option<OnceSender<()>>),
     }
 
     /// WriteCmdData
@@ -292,7 +344,7 @@ pub mod backend {
 
     /// The backend of a write stream, allows collecting the written data
     pub struct WriteStreamBackend {
-        recv: tokio::sync::mpsc::UnboundedReceiver<WriteCmdInner>,
+        recv: MultiReceiver<WriteCmdInner>,
         buf: Option<WriteCmdInner>,
         error_code: u64,
     }
@@ -322,7 +374,7 @@ pub mod backend {
                 WriteCmdInner::Stop(error_code, send) => {
                     self.error_code = error_code;
                     if let Some(send) = send {
-                        send.send(Ok(()));
+                        send.send(());
                     }
                     Poll::Ready(WriteCmdInner::Stop(error_code, None))
                 }
@@ -380,20 +432,27 @@ pub mod backend {
     }
 
     /// Construct a new write stream backend and frontend pair
-    pub fn write_stream_pair(
+    pub fn write_stream_pair<Runtime: AsyncRuntime>(
         buf_size: usize,
     ) -> (WriteStreamBackend, WriteStream) {
         let counter = Counter::new(buf_size);
-        // unbounded ok, because we're using Counter to set a bound
-        // on the outstanding byte count sent over the channel
-        let (send, recv) = tokio::sync::mpsc::unbounded_channel();
+        // if we're sending less than 8 byte chunks, we probably
+        // deserve to be limited
+        let chan_size = std::cmp::max(8, buf_size / 8);
+        let (send, recv) = Runtime::channel(chan_size);
+        let one_shot_unit = Box::new(|| Runtime::one_shot());
         (
             WriteStreamBackend {
                 recv,
                 buf: None,
                 error_code: 0,
             },
-            WriteStream { counter, send },
+            WriteStream {
+                counter,
+                send,
+                sender: None,
+                one_shot_unit,
+            },
         )
     }
 }
@@ -402,9 +461,7 @@ use backend::*;
 
 /// Quic read stream
 pub struct ReadStream {
-    recv: tokio::sync::mpsc::UnboundedReceiver<
-        AqResult<(bytes::Bytes, CounterAddPermit)>,
-    >,
+    recv: MultiReceiver<AqResult<(bytes::Bytes, CounterAddPermit)>>,
     buf: Option<(bytes::Bytes, CounterAddPermit)>,
     error_code: Arc<atomic::AtomicU64>,
 }
@@ -488,10 +545,18 @@ impl ReadStream {
     }
 }
 
+type OnceChan<T> = Box<
+    dyn Fn() -> (OnceSender<T>, AqFut<'static, Option<T>>) + 'static + Send,
+>;
+
 /// Quic write stream
 pub struct WriteStream {
     counter: Counter,
-    send: tokio::sync::mpsc::UnboundedSender<WriteCmdInner>,
+    send: MultiSender<WriteCmdInner>,
+    sender: Option<OnceSender<WriteCmdInner>>,
+
+    // avoid having the runtime generic on this type
+    one_shot_unit: OnceChan<()>,
 }
 
 impl WriteStream {
@@ -500,9 +565,22 @@ impl WriteStream {
         &mut self,
         cx: &mut Context<'_>,
         data: &mut bytes::Bytes,
-    ) -> Poll<AqResult<()>> {
+    ) -> Poll<ChanResult<()>> {
+        let sender = if let Some(sender) = self.sender.take() {
+            sender
+        } else {
+            match self.send.poll_acquire(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(sender)) => sender,
+            }
+        };
+
         match self.counter.reserve(cx) {
-            None => Poll::Pending,
+            None => {
+                self.sender = Some(sender);
+                Poll::Pending
+            }
             Some(mut permit) => {
                 let b = if data.len() >= permit.len() {
                     data.split_to(permit.len())
@@ -511,9 +589,7 @@ impl WriteStream {
                     permit.downgrade_to(len);
                     data.split_to(len)
                 };
-                self.send
-                    .send(WriteCmdInner::Data(b, permit))
-                    .map_err(|_| one_err::OneErr::new("ChannelClosed"))?;
+                sender.send(WriteCmdInner::Data(b, permit));
                 Poll::Ready(Ok(()))
             }
         }
@@ -523,11 +599,11 @@ impl WriteStream {
     pub async fn write_bytes(
         &mut self,
         data: &mut bytes::Bytes,
-    ) -> AqResult<()> {
+    ) -> ChanResult<()> {
         struct X<'lt1, 'lt2>(&'lt1 mut WriteStream, &'lt2 mut bytes::Bytes);
 
         impl<'lt1, 'lt2> Future for X<'lt1, 'lt2> {
-            type Output = AqResult<()>;
+            type Output = ChanResult<()>;
 
             fn poll(
                 mut self: Pin<&mut Self>,
@@ -545,7 +621,7 @@ impl WriteStream {
     pub async fn write_bytes_all(
         &mut self,
         data: &mut bytes::Bytes,
-    ) -> AqResult<()> {
+    ) -> ChanResult<()> {
         while !data.is_empty() {
             self.write_bytes(data).await?;
         }
@@ -553,14 +629,12 @@ impl WriteStream {
     }
 
     /// Stop this write channel with error_code
-    pub fn stop(self, error_code: u64) -> OneShotReceiver<()> {
-        OneShotReceiver::new(async move {
-            let (s, r) = one_shot_channel();
-            self.send
-                .send(WriteCmdInner::Stop(error_code, Some(s)))
-                .map_err(|_| one_err::OneErr::new("ChannelClosed"))?;
-            Ok(OneShotKind::Forward(r.into_inner()))
-        })
+    pub async fn stop(self, error_code: u64) {
+        if let Ok(send) = self.send.acquire().await {
+            let (s, r) = (self.one_shot_unit)();
+            send.send(WriteCmdInner::Stop(error_code, Some(s)));
+            r.await;
+        }
     }
 }
 

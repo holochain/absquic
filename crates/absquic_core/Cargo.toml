@@ -5,11 +5,10 @@ edition = "2021"
 
 [dependencies]
 bytes = "1.1.0"
+futures-core = "0.3.21"
 one_err = "0.0.5"
 parking_lot = "0.12.0"
-# TODO - would be nice to use something more generic / light weight
-#        we've tried to keep the api agnostic so we can change this out
-tokio = { version = "1.17.0", features = [ "sync" ] }
+tokio = { version = "1.17.0", default-features = false, optional = true }
 
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.5.4", features = ["futures", "checkpoint"] }
@@ -17,3 +16,13 @@ loom = { version = "0.5.4", features = ["futures", "checkpoint"] }
 [dev-dependencies]
 futures = "0.3.21"
 tokio = { version = "1.17.0", features = [ "full" ] }
+
+[package.metadata.docs.rs]
+# build docs.rs page with all features enabled so we can see the APIs
+all-features = true
+
+[features]
+default = []
+
+# oddly enough, we don't need the 'rt' feature : )
+tokio_runtime = ["tokio", "tokio/sync", "tokio/time"]

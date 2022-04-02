@@ -13,7 +13,8 @@ test: tools
 	cargo clippy
 	RUST_BACKTRACE=1 cargo test --all-targets --all-features
 	LOOM_MAX_PREEMPTIONS=5 RUSTFLAGS="--cfg loom" RUST_BACKTRACE=1 \
-		cargo test --release --manifest-path crates/absquic_core/Cargo.toml
+		cargo test --all-features --release \
+		--manifest-path crates/absquic_core/Cargo.toml
 	cargo readme -r crates/absquic_core -o README.md
 	cargo readme -r crates/absquic_quinn_udp -o README.md
 	cargo readme -r crates/absquic_quinn -o README.md

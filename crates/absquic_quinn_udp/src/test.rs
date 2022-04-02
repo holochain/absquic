@@ -1,7 +1,8 @@
 use crate::*;
+use absquic_core::runtime::AsyncRuntime;
+use absquic_core::tokio_runtime::TokioRuntime;
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_udp() {
+async fn test_udp<Runtime: AsyncRuntime>() {
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .with_env_filter(
             tracing_subscriber::filter::EnvFilter::from_default_env(),
@@ -14,57 +15,85 @@ async fn test_udp() {
 
     let factory = QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
 
-    let (mut s1, r1, d1) = factory.bind().await.unwrap();
-    let t1 = tokio::task::spawn(d1);
+    let (cmd1, send1, recv1) = factory.bind::<TokioRuntime>().await.unwrap();
+    let (s, r) = Runtime::one_shot();
+    cmd1.acquire()
+        .await
+        .unwrap()
+        .send(UdpBackendCmd::GetLocalAddress(s));
+    let addr1 = r.await.unwrap().unwrap();
+    tracing::warn!("addr1: {:?}", addr1);
 
-    let (mut s2, mut r2, d2) = factory.bind().await.unwrap();
-    let t2 = tokio::task::spawn(d2);
+    let (cmd2, send2, mut recv2) =
+        factory.bind::<TokioRuntime>().await.unwrap();
+    let (s, r) = Runtime::one_shot();
+    cmd2.acquire()
+        .await
+        .unwrap()
+        .send(UdpBackendCmd::GetLocalAddress(s));
+    let addr2 = r.await.unwrap().unwrap();
+    tracing::warn!("addr2: {:?}", addr2);
 
-    let addr2 = s2.local_addr().await.unwrap();
-    println!("addr2: {:?}", addr2);
+    let (os, or) = Runtime::one_shot();
 
-    let (os, or) = tokio::sync::oneshot::channel();
+    let task = Runtime::spawn(async move {
+        let data = recv2.recv().await;
+        os.send(());
 
-    let tr2 = tokio::task::spawn(async move {
-        let data = r2.recv().await;
-        let _ = os.send(());
-
-        println!("r2 got: {:#?}", data);
-        assert_eq!(b"hello", data.unwrap().data.as_ref());
+        match data.unwrap() {
+            UdpBackendEvt::InUdpPacket(packet) => {
+                tracing::warn!("recv2 got: {:#?}", packet);
+                assert_eq!(b"hello", packet.data.as_ref());
+            }
+        }
 
         // make sure the channel ends
-        while let Some(_) = r2.recv().await {}
+        while let Some(_) = recv2.recv().await {}
+
+        Ok(())
     });
 
-    println!("sending");
+    tracing::warn!("sending");
 
     // udp is unreliable, but we should get at least 1 out of 5 : )
     for _ in 0..5 {
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        Runtime::sleep(
+            std::time::Instant::now() + std::time::Duration::from_millis(1),
+        )
+        .await;
 
-        s1.send(OutUdpPacket {
+        send1.acquire().await.unwrap().send(OutUdpPacket {
             dst_addr: addr2,
             ecn: None,
             data: b"hello".to_vec(),
             segment_size: None,
             src_ip: None,
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    println!("awaiting recv");
+    tracing::warn!("awaiting recv");
     or.await.unwrap();
 
-    println!("dropping handles");
-    drop(s1);
-    drop(r1);
-    drop(s2);
+    tracing::warn!("dropping handles");
+    cmd1.acquire()
+        .await
+        .unwrap()
+        .send(UdpBackendCmd::CloseImmediate);
+    drop(cmd1);
+    drop(send1);
+    drop(recv1);
+    cmd2.acquire()
+        .await
+        .unwrap()
+        .send(UdpBackendCmd::CloseImmediate);
+    drop(cmd2);
+    drop(send2);
 
-    println!("await recv task");
-    tr2.await.unwrap();
-    println!("await d1");
-    t1.await.unwrap();
-    println!("await d2");
-    t2.await.unwrap();
+    tracing::warn!("await recv task");
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_udp_tokio() {
+    test_udp::<TokioRuntime>().await;
 }
