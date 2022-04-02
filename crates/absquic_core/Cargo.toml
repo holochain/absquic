@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 bytes = "1.1.0"
-futures-core = "0.3.21"
+futures-core = { version = "0.3.21", default-features = false }
 one_err = "0.0.5"
 parking_lot = "0.12.0"
 tokio = { version = "1.17.0", default-features = false, optional = true }
