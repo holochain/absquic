@@ -57,6 +57,26 @@ pub enum UdpBackendCmd {
     GetLocalAddress(OnceSender<AqResult<SocketAddr>>),
 }
 
+impl MultiSender<UdpBackendCmd> {
+    /// Immediately shutdown the socket - data in flight may be lost
+    pub async fn close_immediate(&self) {
+        if let Ok(sender) = self.acquire().await {
+            sender.send(UdpBackendCmd::CloseImmediate);
+        }
+    }
+
+    /// Get the local address the udp backend socket is currently bound to
+    pub async fn get_local_address<Runtime: AsyncRuntime>(
+        &self,
+    ) -> AqResult<SocketAddr> {
+        let (s, r) = Runtime::one_shot();
+        self.acquire()
+            .await?
+            .send(UdpBackendCmd::GetLocalAddress(s));
+        r.await.ok_or(ChannelClosed)?
+    }
+}
+
 /// Events emitted by the udp backend socket
 pub enum UdpBackendEvt {
     /// A udp packet was received by the udp backend socket

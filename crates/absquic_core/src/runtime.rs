@@ -19,6 +19,12 @@ impl std::fmt::Display for ChannelClosed {
 
 impl std::error::Error for ChannelClosed {}
 
+impl From<ChannelClosed> for one_err::OneErr {
+    fn from(_: ChannelClosed) -> Self {
+        one_err::OneErr::new("ChannelClosed")
+    }
+}
+
 /// Channel result
 pub type ChanResult<T> = std::result::Result<T, ChannelClosed>;
 
