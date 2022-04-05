@@ -12,31 +12,20 @@ pub mod backend {
     /// Send a control command to the connection backend implementation
     pub enum ConnectionCmd {
         /// Get the remote address of this connection
-        GetRemoteAddress(OnceSender<SocketAddr>),
+        GetRemoteAddress(OnceSender<AqResult<SocketAddr>>),
 
         /// Open a new outgoing uni-directional stream
-        OpenUniStream(OnceSender<WriteStream>),
+        OpenUniStream(OnceSender<AqResult<WriteStream>>),
 
         /// Open a new outgoing bi-directional stream
-        OpenBiStream(OnceSender<(WriteStream, ReadStream)>),
+        OpenBiStream(OnceSender<AqResult<(WriteStream, ReadStream)>>),
     }
 
     /// As a backend library, construct an absquic connection instance
-    pub fn construct_connection<Runtime: AsyncRuntime>() -> (
-        Connection,
-        MultiReceiver<ConnectionCmd>,
-        MultiSender<ConnectionEvt>,
-        MultiReceiver<ConnectionEvt>,
-    ) {
-        let (cmd_send, cmd_recv) = Runtime::channel(32);
-        let (evt_send, evt_recv) = Runtime::channel(32);
-
-        (
-            Connection::new::<Runtime>(cmd_send),
-            cmd_recv,
-            evt_send,
-            evt_recv,
-        )
+    pub fn construct_connection<Runtime: AsyncRuntime>(
+        cmd_send: MultiSender<ConnectionCmd>,
+    ) -> Connection {
+        Connection::new::<Runtime>(cmd_send)
     }
 }
 
@@ -88,9 +77,9 @@ pub struct Connection {
     cmd_send: MultiSender<ConnectionCmd>,
 
     // these handles let us avoid having the runtime generic on this type
-    one_shot_socket_addr: OnceChan<SocketAddr>,
-    one_shot_write_stream: OnceChan<WriteStream>,
-    one_shot_bi_stream: OnceChan<(WriteStream, ReadStream)>,
+    one_shot_socket_addr: OnceChan<AqResult<SocketAddr>>,
+    one_shot_write_stream: OnceChan<AqResult<WriteStream>>,
+    one_shot_bi_stream: OnceChan<AqResult<(WriteStream, ReadStream)>>,
 }
 
 impl Connection {
@@ -109,34 +98,34 @@ impl Connection {
     }
 
     /// The current address associated with the remote side of this connection
-    pub async fn remote_address(&mut self) -> ChanResult<SocketAddr> {
+    pub async fn remote_address(&mut self) -> AqResult<SocketAddr> {
         let (s, r) = (self.one_shot_socket_addr)();
         self.cmd_send
             .acquire()
             .await?
             .send(ConnectionCmd::GetRemoteAddress(s));
-        r.await.ok_or(ChannelClosed)
+        r.await.ok_or(ChannelClosed)?
     }
 
     /// Open a new outgoing uni-directional stream
-    pub async fn open_uni_stream(&mut self) -> ChanResult<WriteStream> {
+    pub async fn open_uni_stream(&mut self) -> AqResult<WriteStream> {
         let (s, r) = (self.one_shot_write_stream)();
         self.cmd_send
             .acquire()
             .await?
             .send(ConnectionCmd::OpenUniStream(s));
-        r.await.ok_or(ChannelClosed)
+        r.await.ok_or(ChannelClosed)?
     }
 
     /// Open a new outgoing bi-directional stream
     pub async fn open_bi_stream(
         &mut self,
-    ) -> ChanResult<(WriteStream, ReadStream)> {
+    ) -> AqResult<(WriteStream, ReadStream)> {
         let (s, r) = (self.one_shot_bi_stream)();
         self.cmd_send
             .acquire()
             .await?
             .send(ConnectionCmd::OpenBiStream(s));
-        r.await.ok_or(ChannelClosed)
+        r.await.ok_or(ChannelClosed)?
     }
 }

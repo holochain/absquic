@@ -14,5 +14,6 @@ tokio = { version = "1.17.0", optional = true }
 tokio = { version = "1.17.0", features = [ "full" ] }
 
 [features]
-default = ["absquic_quinn", "absquic_quinn_udp", "tokio_time"]
-tokio_time = ["tokio", "tokio/time", "tokio/rt"]
+default = []
+tokio_runtime = ["absquic_core/tokio_runtime"]
+quinn_dev_utils = ["absquic_quinn", "absquic_quinn/dev_utils"]

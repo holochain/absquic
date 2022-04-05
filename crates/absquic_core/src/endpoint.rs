@@ -14,12 +14,14 @@ pub mod backend {
     /// Send a control command to the endpoint backend implementation
     pub enum EndpointCmd {
         /// Get the local addr this endpoint is bound to
-        GetLocalAddress(OnceSender<SocketAddr>),
+        GetLocalAddress(OnceSender<AqResult<SocketAddr>>),
 
         /// Attempt to establish a new outgoing connection
         Connect {
             /// Resp sender for the result of the connection attempt
-            sender: OnceSender<(Connection, MultiReceiver<ConnectionEvt>)>,
+            sender: OnceSender<
+                AqResult<(Connection, MultiReceiver<ConnectionEvt>)>,
+            >,
 
             /// The address to connect to
             addr: SocketAddr,
@@ -51,8 +53,9 @@ pub struct Endpoint {
     cmd_send: MultiSender<EndpointCmd>,
 
     // these handles let us avoid having the runtime generic on this type
-    one_shot_socket_addr: OnceChan<SocketAddr>,
-    one_shot_connect: OnceChan<(Connection, MultiReceiver<ConnectionEvt>)>,
+    one_shot_socket_addr: OnceChan<AqResult<SocketAddr>>,
+    one_shot_connect:
+        OnceChan<AqResult<(Connection, MultiReceiver<ConnectionEvt>)>>,
 }
 
 impl Endpoint {
@@ -83,13 +86,13 @@ impl Endpoint {
     }
 
     /// The current address this endpoint is bound to
-    pub async fn local_address(&mut self) -> ChanResult<SocketAddr> {
+    pub async fn local_address(&mut self) -> AqResult<SocketAddr> {
         let (s, r) = (self.one_shot_socket_addr)();
         self.cmd_send
             .acquire()
             .await?
             .send(EndpointCmd::GetLocalAddress(s));
-        r.await.ok_or(ChannelClosed)
+        r.await.ok_or(ChannelClosed)?
     }
 
     /// Attempt to establish a new outgoing connection
@@ -97,13 +100,13 @@ impl Endpoint {
         &mut self,
         addr: SocketAddr,
         server_name: &str,
-    ) -> ChanResult<(Connection, MultiReceiver<ConnectionEvt>)> {
+    ) -> AqResult<(Connection, MultiReceiver<ConnectionEvt>)> {
         let (s, r) = (self.one_shot_connect)();
         self.cmd_send.acquire().await?.send(EndpointCmd::Connect {
             sender: s,
             addr,
             server_name: server_name.to_string(),
         });
-        r.await.ok_or(ChannelClosed)
+        r.await.ok_or(ChannelClosed)?
     }
 }

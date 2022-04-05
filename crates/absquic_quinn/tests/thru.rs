@@ -1,5 +1,6 @@
 #![cfg(not(loom))]
 
+/*
 use absquic_core::connection::*;
 use absquic_core::deps::bytes;
 use absquic_core::endpoint::*;
@@ -184,3 +185,4 @@ impl TimeoutsScheduler for T {
         }));
     }
 }
+*/

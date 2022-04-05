@@ -47,7 +47,7 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
         let addr = self.addr;
         let max_udp_size = self.max_udp_size;
         AqFut::new(async move {
-            let chan_size = std::cmp::max(32, quinn_udp::BATCH_SIZE);
+            let chan_size = std::cmp::max(8, quinn_udp::BATCH_SIZE) * 2;
 
             let (cmd_send, cmd_recv) = Runtime::channel(chan_size);
             let (pak_in_send, pak_in_recv) = Runtime::channel(chan_size);

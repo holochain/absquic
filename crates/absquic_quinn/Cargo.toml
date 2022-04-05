@@ -5,24 +5,29 @@ edition = "2021"
 
 [dependencies]
 absquic_core = { version = "0.0.1", path = "../absquic_core" }
+futures-util = "0.3.21"
+pin-project-lite = "0.2.4"
 quinn-proto = "0.8.2"
 rcgen = { version = "0.9.2", optional = true }
 rustls = { version = "0.20.4" }
 tracing = { version = "0.1.32" }
 
 [dev-dependencies]
+absquic_core = { version = "0.0.1", path = "../absquic_core", features = [ "tokio_runtime" ] }
 absquic_quinn_udp = { version = "0.0.1", path = "../absquic_quinn_udp" }
 criterion = { version = "0.3.5", features = [ "async_tokio" ] }
 futures = "0.3.21"
 quinn = "0.8.2"
+rcgen = "0.9.2"
 ring = "0.16.20"
+rustls = { version = "0.20.4", features = [ "dangerous_configuration" ] }
 tokio = { version = "1.17.0", features = [ "full" ] }
 tracing-subscriber = { version = "0.3.9", features = [ "env-filter" ] }
 
 [features]
-default = ["dev_utils"]
+default = []
 dev_utils = ["rcgen", "rustls/dangerous_configuration"]
 
-[[bench]]
-name = "quinn"
-harness = false
+#[[bench]]
+#name = "quinn"
+#harness = false

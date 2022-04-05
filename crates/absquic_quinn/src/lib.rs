@@ -6,6 +6,92 @@
 use absquic_core::backend::*;
 use absquic_core::connection::backend::*;
 use absquic_core::connection::*;
+use absquic_core::deps::one_err;
+use absquic_core::endpoint::backend::*;
+use absquic_core::endpoint::*;
+use absquic_core::runtime::*;
+use absquic_core::*;
+use futures_util::stream::StreamExt;
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
+
+/// Re-exported dependencies
+pub mod deps {
+    pub use absquic_core;
+    pub use quinn_proto;
+    pub use rustls;
+}
+
+pub use quinn_proto::ClientConfig as QuinnClientConfig;
+pub use quinn_proto::EndpointConfig as QuinnEndpointConfig;
+pub use quinn_proto::ServerConfig as QuinnServerConfig;
+
+mod connection;
+pub(crate) use connection::*;
+
+mod endpoint;
+pub(crate) use endpoint::*;
+
+/// Absquic backend powered by quinn-proto
+pub struct QuinnQuicBackendFactory {
+    endpoint_config: Arc<quinn_proto::EndpointConfig>,
+    server_config: Option<Arc<quinn_proto::ServerConfig>>,
+    client_config: Arc<quinn_proto::ClientConfig>,
+}
+
+impl QuinnQuicBackendFactory {
+    /// Construct a new absquic driver factory backed by quinn-proto
+    pub fn new(
+        endpoint_config: QuinnEndpointConfig,
+        server_config: Option<QuinnServerConfig>,
+        client_config: QuinnClientConfig,
+    ) -> Self {
+        Self {
+            endpoint_config: Arc::new(endpoint_config),
+            server_config: server_config.map(Arc::new),
+            client_config: Arc::new(client_config),
+        }
+    }
+}
+
+impl QuicBackendFactory for QuinnQuicBackendFactory {
+    fn bind<Runtime: AsyncRuntime, Udp: UdpBackendFactory>(
+        &self,
+        udp_backend: Udp,
+    ) -> AqFut<
+        'static,
+        AqResult<(MultiSender<EndpointCmd>, MultiReceiver<EndpointEvt>)>,
+    > {
+        let endpoint_config = self.endpoint_config.clone();
+        let server_config = self.server_config.clone();
+        let client_config = self.client_config.clone();
+        AqFut::new(async move {
+            let (udp_cmd_send, udp_packet_send, udp_packet_recv) =
+                udp_backend.bind::<Runtime>().await?;
+
+            let endpoint =
+                quinn_proto::Endpoint::new(endpoint_config, server_config);
+
+            Ok(<EndpointDriver<Runtime>>::spawn(
+                client_config,
+                endpoint,
+                udp_cmd_send,
+                udp_packet_send,
+                udp_packet_recv,
+            ))
+        })
+    }
+}
+
+/*
+use absquic_core::backend::*;
+use absquic_core::connection::backend::*;
+use absquic_core::connection::*;
 use absquic_core::deps::{bytes, one_err, parking_lot};
 use absquic_core::endpoint::backend::*;
 use absquic_core::endpoint::*;
@@ -39,16 +125,6 @@ mod trace_timing {
     }
 }
 
-/// Re-exported dependencies
-pub mod deps {
-    pub use absquic_core;
-    pub use quinn_proto;
-    pub use rustls;
-}
-
-pub use quinn_proto::ClientConfig as QuinnClientConfig;
-pub use quinn_proto::EndpointConfig as QuinnEndpointConfig;
-pub use quinn_proto::ServerConfig as QuinnServerConfig;
 
 #[cfg(feature = "dev_utils")]
 pub mod dev_utils;
@@ -601,3 +677,4 @@ impl QuinnDriver {
         }
     }
 }
+*/
