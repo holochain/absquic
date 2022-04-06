@@ -19,7 +19,7 @@ pub enum EpCmd {
 }
 
 type EpCmdRecv = futures_util::stream::BoxStream<'static, EpCmd>;
-type ConMap = HashMap<quinn_proto::ConnectionHandle, MultiSender<ConCmd>>;
+type ConMap = HashMap<quinn_proto::ConnectionHandle, MultiSenderPoll<ConCmd>>;
 
 pin_project_lite::pin_project! {
     pub struct EndpointDriver<Runtime: AsyncRuntime> {

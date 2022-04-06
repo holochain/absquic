@@ -12,9 +12,9 @@ type ConEvtMap = HashMap<
 
 pin_project_lite::pin_project! {
     pub struct UdpInDriver<Runtime: AsyncRuntime> {
-        ep_cmd_send: MultiSender<EpCmd>,
-        udp_packet_send: MultiSender<OutUdpPacket>,
-        evt_send: MultiSender<EndpointEvt>,
+        ep_cmd_send: MultiSenderPoll<EpCmd>,
+        udp_packet_send: MultiSenderPoll<OutUdpPacket>,
+        evt_send: MultiSenderPoll<EndpointEvt>,
         evt_send_closed: bool,
         udp_packet_recv: MultiReceiver<UdpBackendEvt>,
         udp_packet_recv_closed: bool,
@@ -32,9 +32,9 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
         udp_packet_recv: MultiReceiver<UdpBackendEvt>,
     ) -> Self {
         Self {
-            ep_cmd_send,
-            udp_packet_send,
-            evt_send,
+            ep_cmd_send: MultiSenderPoll::new(ep_cmd_send),
+            udp_packet_send: MultiSenderPoll::new(udp_packet_send),
+            evt_send: MultiSenderPoll::new(evt_send),
             evt_send_closed: false,
             udp_packet_recv,
             udp_packet_recv_closed: false,
@@ -46,7 +46,7 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
 
     fn try_send_new_con(
         cx: &mut Context<'_>,
-        evt_send: &mut MultiSender<EndpointEvt>,
+        evt_send: &mut MultiSenderPoll<EndpointEvt>,
         evt_send_closed: &mut bool,
         new_con_buf: &mut NewConQueue,
     ) -> Option<OnceSender<EndpointEvt>> {
@@ -75,7 +75,7 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
             ep_cmd_send,
             udp_packet_send,
         );
-        connections.insert(hnd, con_cmd_send);
+        connections.insert(hnd, MultiSenderPoll::new(con_cmd_send));
         (con, con_recv)
     }
 
@@ -99,8 +99,8 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
             ) {
                 let (hnd, con) = this.new_con_buf.pop_front().unwrap();
                 let (con, con_recv) = Self::register_con(
-                    this.ep_cmd_send.clone(),
-                    this.udp_packet_send.clone(),
+                    this.ep_cmd_send.as_inner().clone(),
+                    this.udp_packet_send.as_inner().clone(),
                     connections,
                     hnd,
                     con,
@@ -258,8 +258,8 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
                                             this.new_con_buf,
                                         ) {
                                             let (con, con_recv) = Self::register_con(
-                                                this.ep_cmd_send.clone(),
-                                                this.udp_packet_send.clone(),
+                                                this.ep_cmd_send.as_inner().clone(),
+                                                this.udp_packet_send.as_inner().clone(),
                                                 connections,
                                                 hnd,
                                                 con,

@@ -9,6 +9,9 @@ pub(crate) use transmit::*;
 mod ep_evt;
 pub(crate) use ep_evt::*;
 
+mod con_poll;
+pub(crate) use con_poll::*;
+
 pub enum ConCmd {
     ConEvt(quinn_proto::ConnectionEvent),
     ConCmd(ConnectionCmd),
@@ -16,12 +19,21 @@ pub enum ConCmd {
 
 type ConCmdRecv = futures_util::stream::BoxStream<'static, ConCmd>;
 
+pub type StreamMap = HashMap<quinn_proto::StreamId, StreamInfo>;
+
 pin_project_lite::pin_project! {
     pub struct ConnectionDriver<Runtime: AsyncRuntime> {
         connection: quinn_proto::Connection,
 
+        inbound_datagrams: bool,
+        inbound_uni: bool,
+        inbound_bi: bool,
+        outbound_uni: bool,
+        outbound_bi: bool,
+        streams: StreamMap,
+
         #[pin]
-        con_cmd: ConCmdDriver,
+        con_cmd: ConCmdDriver<Runtime>,
 
         #[pin]
         transmit: ConTransmitDriver,
@@ -29,7 +41,8 @@ pin_project_lite::pin_project! {
         #[pin]
         ep_evt: EpEvtDriver,
 
-        _p: std::marker::PhantomData<Runtime>,
+        #[pin]
+        con_poll: ConPollDriver<Runtime>,
     }
 }
 
@@ -57,7 +70,7 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
         MultiSender<ConCmd>,
         MultiReceiver<ConnectionEvt>,
     ) {
-        let (_con_evt_send, con_evt_recv) = Runtime::channel(16);
+        let (con_evt_send, con_evt_recv) = Runtime::channel(16);
         let (cmd_send, cmd_recv) = Runtime::channel(16);
         let con = construct_connection::<Runtime>(cmd_send);
         let (con_cmd_send, con_cmd_recv) = Runtime::channel(16);
@@ -73,14 +86,22 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
 
         let ep_evt = EpEvtDriver::new(hnd, con_cmd_send.clone(), ep_cmd_send);
 
+        let con_poll = ConPollDriver::new(con_evt_send);
+
         Runtime::spawn(Self {
             connection,
+
+            inbound_datagrams: true,
+            inbound_uni: true,
+            inbound_bi: true,
+            outbound_uni: true,
+            outbound_bi: true,
+            streams: StreamMap::new(),
 
             con_cmd,
             transmit,
             ep_evt,
-
-            _p: std::marker::PhantomData,
+            con_poll,
         });
 
         (con, con_cmd_send, con_evt_recv)
@@ -100,14 +121,42 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
 
             let now = std::time::Instant::now();
 
+            // quinn_proto::Connection wants us to use the following order:
+            //
+            // A) simple getters (can be called whenever)
+            // B) network handlers (handled at the endpoint level)
+            // C) commands / stream io
+            // D) - 1) poll_transmit
+            //    - 2) poll_timeout
+            //    - 3) poll_endpoint_events
+            //    - 4) poll
+
+            // C - commands
             let mut con_cmd_want_close = false;
             this.con_cmd.as_mut().poll(
                 cx,
+                this.streams,
                 this.connection,
+                this.outbound_uni,
+                this.outbound_bi,
                 &mut more_work,
                 &mut con_cmd_want_close,
             )?;
 
+            // C - stream io
+            let mut rm_stream = Vec::new();
+            for (id, info) in this.streams.iter_mut() {
+                let mut rm = false;
+                info.poll(cx, this.connection, &mut rm)?;
+                if rm {
+                    rm_stream.push(*id);
+                }
+            }
+            for id in rm_stream {
+                this.streams.remove(&id);
+            }
+
+            // D.1 - poll_transmit
             let mut transmit_want_close = false;
             this.transmit.as_mut().poll(
                 cx,
@@ -117,8 +166,9 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
                 &mut transmit_want_close,
             )?;
 
-            // TODO poll_timeout()
+            // TODO D.2 - poll_timeout
 
+            // D.3 - poll_endpoint_events
             let mut ep_evt_want_close = false;
             this.ep_evt.as_mut().poll(
                 cx,
@@ -127,7 +177,26 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
                 &mut ep_evt_want_close,
             )?;
 
-            if con_cmd_want_close && transmit_want_close && ep_evt_want_close {
+            // D.4 - poll
+            let mut con_poll_want_close = false;
+            this.con_poll.as_mut().poll(
+                cx,
+                this.inbound_datagrams,
+                this.inbound_uni,
+                this.inbound_bi,
+                this.outbound_uni,
+                this.outbound_bi,
+                this.streams,
+                this.connection,
+                &mut more_work,
+                &mut con_poll_want_close,
+            )?;
+
+            if con_cmd_want_close
+                && transmit_want_close
+                && ep_evt_want_close
+                && con_poll_want_close
+            {
                 return Err("QuinnConDriverClosing".into());
             }
 

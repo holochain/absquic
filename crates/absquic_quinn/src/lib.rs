@@ -6,10 +6,12 @@
 use absquic_core::backend::*;
 use absquic_core::connection::backend::*;
 use absquic_core::connection::*;
-use absquic_core::deps::one_err;
+use absquic_core::deps::{bytes, one_err};
 use absquic_core::endpoint::backend::*;
 use absquic_core::endpoint::*;
 use absquic_core::runtime::*;
+use absquic_core::stream::backend::*;
+use absquic_core::stream::*;
 use absquic_core::*;
 use futures_util::stream::StreamExt;
 use std::collections::HashMap;
@@ -30,6 +32,12 @@ pub mod deps {
 pub use quinn_proto::ClientConfig as QuinnClientConfig;
 pub use quinn_proto::EndpointConfig as QuinnEndpointConfig;
 pub use quinn_proto::ServerConfig as QuinnServerConfig;
+
+// buffer size for read / write streams - arbitrary, needs experiments
+const BYTES_CAP: usize = 1024 * 16;
+
+mod stream;
+pub(crate) use stream::*;
 
 mod connection;
 pub(crate) use connection::*;

@@ -4,6 +4,7 @@ use crate::runtime::*;
 use crate::*;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// Absquic AsyncRuntime backed by tokio
 pub struct TokioRuntime;
@@ -22,6 +23,27 @@ impl AsyncRuntime for TokioRuntime {
         AqFut::new(async move {
             tokio::time::sleep_until(time.into()).await;
         })
+    }
+
+    fn semaphore(limit: usize) -> DynSemaphore {
+        struct G(tokio::sync::OwnedSemaphorePermit);
+        impl SemaphoreGuard for G {}
+
+        struct X(Arc<tokio::sync::Semaphore>);
+
+        impl Semaphore for X {
+            fn acquire(&self) -> AqFut<'static, DynSemaphoreGuard> {
+                let sem = self.0.clone();
+                AqFut::new(async move {
+                    // safe to unwrap since we never close the semaphore
+                    let guard = sem.acquire_owned().await.unwrap();
+                    let guard: DynSemaphoreGuard = Box::new(G(guard));
+                    guard
+                })
+            }
+        }
+
+        Arc::new(X(Arc::new(tokio::sync::Semaphore::new(limit))))
     }
 
     fn one_shot<T: 'static + Send>(

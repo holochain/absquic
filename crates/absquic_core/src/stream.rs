@@ -97,13 +97,12 @@ pub mod backend {
     }
 
     /// Permit allowing sending of data to the front-end ReadStream
-    pub struct ReadSendPermit<'lt> {
-        _r: &'lt mut ReadStreamBackend,
-        sender: OnceSender<AqResult<(bytes::Bytes, CounterAddPermit)>>,
+    pub struct ReadSendPermit {
+        sender: OnceSender<(bytes::Bytes, CounterAddPermit)>,
         permit: CounterAddPermit,
     }
 
-    impl ReadSendPermit<'_> {
+    impl ReadSendPermit {
         /// The max length of bytes authorized for send
         pub fn max_len(&self) -> usize {
             self.permit.len()
@@ -112,11 +111,7 @@ pub mod backend {
         /// Send bytes to the front-end ReadStream.
         /// This function will panic if data.len() > max_len()
         pub fn send(self, data: bytes::Bytes) {
-            let ReadSendPermit {
-                _r,
-                sender,
-                mut permit,
-            } = self;
+            let ReadSendPermit { sender, mut permit } = self;
 
             let data_len = data.len();
             let permit_len = permit.len();
@@ -127,32 +122,23 @@ pub mod backend {
                 permit.downgrade_to(data_len);
             }
 
-            sender.send(Ok((data, permit)));
+            sender.send((data, permit));
         }
     }
 
     /// The backend of a ReadStream, allows publishing data to the api user
     pub struct ReadStreamBackend {
         counter: Counter,
-        send: MultiSender<AqResult<(bytes::Bytes, CounterAddPermit)>>,
-        sender: Option<OnceSender<AqResult<(bytes::Bytes, CounterAddPermit)>>>,
+        send: MultiSenderPoll<(bytes::Bytes, CounterAddPermit)>,
+        sender: Option<OnceSender<(bytes::Bytes, CounterAddPermit)>>,
         error_code: Arc<atomic::AtomicU64>,
+        err: Arc<Mutex<Option<one_err::OneErr>>>,
     }
 
     impl ReadStreamBackend {
         /// Shutdown this read stream with given error
-        pub fn stop(self, err: one_err::OneErr) -> AqFut<'static, ()> {
-            let ReadStreamBackend { send, .. } = self;
-            AqFut::new(async move {
-                let fut = {
-                    let fut = send.acquire();
-                    drop(send);
-                    fut
-                };
-                if let Ok(sender) = fut.await {
-                    sender.send(Err(err));
-                }
-            })
+        pub fn stop(self, err: one_err::OneErr) {
+            *self.err.lock() = Some(err);
         }
 
         /// Request to push data into the read stream.
@@ -160,29 +146,25 @@ pub mod backend {
         pub fn poll_acquire(
             &mut self,
             cx: &mut Context<'_>,
-        ) -> Poll<Result<ReadSendPermit<'_>, u64>> {
+        ) -> Poll<Result<ReadSendPermit, u64>> {
             match self.poll_inner(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Err(code)) => Poll::Ready(Err(code)),
                 Poll::Ready(Ok((sender, permit))) => {
-                    Poll::Ready(Ok(ReadSendPermit {
-                        _r: self,
-                        sender,
-                        permit,
-                    }))
+                    Poll::Ready(Ok(ReadSendPermit { sender, permit }))
                 }
             }
         }
 
         /// Request to push data into the read stream.
         /// Err(u64) indicates the error code if the stream was stopped
-        pub async fn acquire(&mut self) -> Result<ReadSendPermit<'_>, u64> {
+        pub async fn acquire(&mut self) -> Result<ReadSendPermit, u64> {
             struct X<'lt>(&'lt mut ReadStreamBackend);
 
             impl<'lt> Future for X<'lt> {
                 type Output = Result<
                     (
-                        OnceSender<AqResult<(bytes::Bytes, CounterAddPermit)>>,
+                        OnceSender<(bytes::Bytes, CounterAddPermit)>,
                         CounterAddPermit,
                     ),
                     u64,
@@ -197,11 +179,7 @@ pub mod backend {
             }
 
             let (sender, permit) = X(self).await?;
-            Ok(ReadSendPermit {
-                _r: self,
-                sender,
-                permit,
-            })
+            Ok(ReadSendPermit { sender, permit })
         }
 
         fn poll_inner(
@@ -210,7 +188,7 @@ pub mod backend {
         ) -> Poll<
             Result<
                 (
-                    OnceSender<AqResult<(bytes::Bytes, CounterAddPermit)>>,
+                    OnceSender<(bytes::Bytes, CounterAddPermit)>,
                     CounterAddPermit,
                 ),
                 u64,
@@ -244,6 +222,7 @@ pub mod backend {
         buf_size: usize,
     ) -> (ReadStreamBackend, ReadStream) {
         let error_code = Arc::new(atomic::AtomicU64::new(0));
+        let err = Arc::new(Mutex::new(None));
         let counter = Counter::new(buf_size);
         // if we're sending less than 8 byte chunks, we probably
         // deserve to be limited
@@ -252,14 +231,16 @@ pub mod backend {
         (
             ReadStreamBackend {
                 counter,
-                send,
+                send: MultiSenderPoll::new(send),
                 sender: None,
                 error_code: error_code.clone(),
+                err: err.clone(),
             },
             ReadStream {
                 recv,
                 buf: None,
                 error_code,
+                err,
             },
         )
     }
@@ -347,6 +328,7 @@ pub mod backend {
         recv: MultiReceiver<WriteCmdInner>,
         buf: Option<WriteCmdInner>,
         error_code: u64,
+        err: Arc<Mutex<Option<one_err::OneErr>>>,
     }
 
     impl WriteStreamBackend {
@@ -400,6 +382,11 @@ pub mod backend {
             }
         }
 
+        /// Shut down this write stream with given err
+        pub fn stop(self, err: one_err::OneErr) {
+            *self.err.lock() = Some(err);
+        }
+
         /// Receive data written by the frontend side of this write stream.
         pub fn poll_recv(
             &mut self,
@@ -441,16 +428,19 @@ pub mod backend {
         let chan_size = std::cmp::max(8, buf_size / 8);
         let (send, recv) = Runtime::channel(chan_size);
         let one_shot_unit = Box::new(|| Runtime::one_shot());
+        let err = Arc::new(Mutex::new(None));
         (
             WriteStreamBackend {
                 recv,
                 buf: None,
                 error_code: 0,
+                err: err.clone(),
             },
             WriteStream {
                 counter,
-                send,
+                send: MultiSenderPoll::new(send),
                 sender: None,
+                err,
                 one_shot_unit,
             },
         )
@@ -461,9 +451,10 @@ use backend::*;
 
 /// Quic read stream
 pub struct ReadStream {
-    recv: MultiReceiver<AqResult<(bytes::Bytes, CounterAddPermit)>>,
+    recv: MultiReceiver<(bytes::Bytes, CounterAddPermit)>,
     buf: Option<(bytes::Bytes, CounterAddPermit)>,
     error_code: Arc<atomic::AtomicU64>,
+    err: Arc<Mutex<Option<one_err::OneErr>>>,
 }
 
 impl ReadStream {
@@ -476,9 +467,14 @@ impl ReadStream {
         if self.buf.is_none() {
             match self.recv.poll_recv(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                Poll::Ready(Some(Ok((b, p)))) => self.buf = Some((b, p)),
+                Poll::Ready(None) => {
+                    if let Some(err) = self.err.lock().take() {
+                        return Poll::Ready(Some(Err(err)));
+                    } else {
+                        return Poll::Ready(None);
+                    }
+                }
+                Poll::Ready(Some((b, p))) => self.buf = Some((b, p)),
             }
         }
 
@@ -552,8 +548,9 @@ type OnceChan<T> = Box<
 /// Quic write stream
 pub struct WriteStream {
     counter: Counter,
-    send: MultiSender<WriteCmdInner>,
+    send: MultiSenderPoll<WriteCmdInner>,
     sender: Option<OnceSender<WriteCmdInner>>,
+    err: Arc<Mutex<Option<one_err::OneErr>>>,
 
     // avoid having the runtime generic on this type
     one_shot_unit: OnceChan<()>,
@@ -565,13 +562,19 @@ impl WriteStream {
         &mut self,
         cx: &mut Context<'_>,
         data: &mut bytes::Bytes,
-    ) -> Poll<ChanResult<()>> {
+    ) -> Poll<AqResult<()>> {
         let sender = if let Some(sender) = self.sender.take() {
             sender
         } else {
             match self.send.poll_acquire(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) => {
+                    if let Some(err) = self.err.lock().take() {
+                        return Poll::Ready(Err(err));
+                    } else {
+                        return Poll::Ready(Err(e.into()));
+                    }
+                }
                 Poll::Ready(Ok(sender)) => sender,
             }
         };
@@ -599,11 +602,11 @@ impl WriteStream {
     pub async fn write_bytes(
         &mut self,
         data: &mut bytes::Bytes,
-    ) -> ChanResult<()> {
+    ) -> AqResult<()> {
         struct X<'lt1, 'lt2>(&'lt1 mut WriteStream, &'lt2 mut bytes::Bytes);
 
         impl<'lt1, 'lt2> Future for X<'lt1, 'lt2> {
-            type Output = ChanResult<()>;
+            type Output = AqResult<()>;
 
             fn poll(
                 mut self: Pin<&mut Self>,
@@ -621,7 +624,7 @@ impl WriteStream {
     pub async fn write_bytes_all(
         &mut self,
         data: &mut bytes::Bytes,
-    ) -> ChanResult<()> {
+    ) -> AqResult<()> {
         while !data.is_empty() {
             self.write_bytes(data).await?;
         }

@@ -315,7 +315,7 @@ impl PacketSender {
 }
 
 struct PacketReader {
-    evt_send: MultiSender<UdpBackendEvt>,
+    evt_send: MultiSenderPoll<UdpBackendEvt>,
     evt_send_permits: VecDeque<OnceSender<UdpBackendEvt>>,
     evt_send_closed: bool,
     read_bufs_raw: Box<[bytes::BytesMut]>,
@@ -335,7 +335,7 @@ impl PacketReader {
             vec![Default::default(); quinn_udp::BATCH_SIZE].into_boxed_slice();
 
         Self {
-            evt_send,
+            evt_send: MultiSenderPoll::new(evt_send),
             evt_send_permits: VecDeque::with_capacity(quinn_udp::BATCH_SIZE),
             evt_send_closed: false,
             read_bufs_raw,

@@ -3,9 +3,9 @@ use super::*;
 pin_project_lite::pin_project! {
     pub struct EpEvtDriver {
         hnd: quinn_proto::ConnectionHandle,
-        con_cmd_send: MultiSender<ConCmd>,
+        con_cmd_send: MultiSenderPoll<ConCmd>,
         con_cmd_send_closed: bool,
-        ep_cmd_send: MultiSender<EpCmd>,
+        ep_cmd_send: MultiSenderPoll<EpCmd>,
         ep_cmd_send_closed: bool,
     }
 }
@@ -18,9 +18,9 @@ impl EpEvtDriver {
     ) -> Self {
         Self {
             hnd,
-            con_cmd_send,
+            con_cmd_send: MultiSenderPoll::new(con_cmd_send),
             con_cmd_send_closed: false,
-            ep_cmd_send,
+            ep_cmd_send: MultiSenderPoll::new(ep_cmd_send),
             ep_cmd_send_closed: false,
         }
     }

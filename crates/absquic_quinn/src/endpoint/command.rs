@@ -3,12 +3,12 @@ use super::*;
 pin_project_lite::pin_project! {
     pub struct CommandDriver<Runtime: AsyncRuntime> {
         client_config: Arc<quinn_proto::ClientConfig>,
-        ep_cmd_send: MultiSender<EpCmd>,
-        udp_packet_send: MultiSender<OutUdpPacket>,
+        ep_cmd_send: MultiSenderPoll<EpCmd>,
+        udp_packet_send: MultiSenderPoll<OutUdpPacket>,
         #[pin]
         ep_cmd_recv: futures_util::stream::SelectAll<EpCmdRecv>,
         ep_cmd_recv_closed: bool,
-        udp_cmd_send: MultiSender<UdpBackendCmd>,
+        udp_cmd_send: MultiSenderPoll<UdpBackendCmd>,
         udp_cmd_send_closed: bool,
         _p: std::marker::PhantomData<Runtime>,
     }
@@ -24,11 +24,11 @@ impl<Runtime: AsyncRuntime> CommandDriver<Runtime> {
     ) -> Self {
         Self {
             client_config,
-            ep_cmd_send,
-            udp_packet_send,
+            ep_cmd_send: MultiSenderPoll::new(ep_cmd_send),
+            udp_packet_send: MultiSenderPoll::new(udp_packet_send),
             ep_cmd_recv,
             ep_cmd_recv_closed: false,
-            udp_cmd_send,
+            udp_cmd_send: MultiSenderPoll::new(udp_cmd_send),
             udp_cmd_send_closed: false,
             _p: std::marker::PhantomData,
         }
@@ -80,7 +80,10 @@ impl<Runtime: AsyncRuntime> CommandDriver<Runtime> {
                             let res = endpoint.handle_event(hnd, evt);
                             rsp.send(res);
                         }
-                        EpCmd::EpCmd(EndpointCmd::GetLocalAddress(sender)) => {
+                        EpCmd::EpCmd(EndpointCmd::GetLocalAddress(
+                            sender,
+                            _,
+                        )) => {
                             if let Some(udp_sender) = udp_send.take() {
                                 udp_sender.send(
                                     UdpBackendCmd::GetLocalAddress(sender),
@@ -93,6 +96,7 @@ impl<Runtime: AsyncRuntime> CommandDriver<Runtime> {
                             sender,
                             addr,
                             server_name,
+                            ..
                         }) => {
                             match endpoint.connect(
                                 this.client_config.as_ref().clone(),
@@ -107,10 +111,15 @@ impl<Runtime: AsyncRuntime> CommandDriver<Runtime> {
                                         <ConnectionDriver<Runtime>>::spawn(
                                             hnd,
                                             con,
-                                            this.ep_cmd_send.clone(),
-                                            this.udp_packet_send.clone(),
+                                            this.ep_cmd_send.as_inner().clone(),
+                                            this.udp_packet_send
+                                                .as_inner()
+                                                .clone(),
                                         );
-                                    connections.insert(hnd, con_cmd_send);
+                                    connections.insert(
+                                        hnd,
+                                        MultiSenderPoll::new(con_cmd_send),
+                                    );
                                     sender.send(Ok((con, con_recv)));
                                 }
                             }

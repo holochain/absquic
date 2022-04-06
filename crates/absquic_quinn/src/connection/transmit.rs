@@ -2,7 +2,7 @@ use super::*;
 
 pin_project_lite::pin_project! {
     pub struct ConTransmitDriver {
-        udp_packet_send: MultiSender<OutUdpPacket>,
+        udp_packet_send: MultiSenderPoll<OutUdpPacket>,
         udp_packet_send_closed: bool,
     }
 }
@@ -10,7 +10,7 @@ pin_project_lite::pin_project! {
 impl ConTransmitDriver {
     pub fn new(udp_packet_send: MultiSender<OutUdpPacket>) -> Self {
         Self {
-            udp_packet_send,
+            udp_packet_send: MultiSenderPoll::new(udp_packet_send),
             udp_packet_send_closed: false,
         }
     }

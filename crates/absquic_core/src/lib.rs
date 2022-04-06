@@ -65,6 +65,13 @@ impl<'lt, T> Future for AqFut<'lt, T> {
     }
 }
 
+// Semaphore limit for both endpoint and connection commands.
+// We want this to be high enough we don't experience deadlocks
+// on legitimate long-term acquires like waiting on stream availability,
+// but small enough that implementations can buffer all incoming
+// response OnceSenders without worrying about memory bounds
+const CMD_LIMIT: usize = 128;
+
 pub mod backend;
 pub mod connection;
 pub mod endpoint;

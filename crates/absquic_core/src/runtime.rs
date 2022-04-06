@@ -42,6 +42,9 @@ pub trait AsyncRuntime: 'static + Send + Sync {
     /// or immediately if the instant is already past
     fn sleep(time: std::time::Instant) -> AqFut<'static, ()>;
 
+    /// Create an async semaphore instance
+    fn semaphore(limit: usize) -> DynSemaphore;
+
     /// Creates a slot for a single data transfer
     fn one_shot<T: 'static + Send>(
     ) -> (OnceSender<T>, AqFut<'static, Option<T>>);
@@ -79,6 +82,21 @@ impl<R: 'static + Send> Future for SpawnHnd<R> {
     }
 }
 
+/// Abstract async semaphore guard implementation
+pub trait SemaphoreGuard: 'static + Send {}
+
+/// Abstract async semaphore guard implementation
+pub type DynSemaphoreGuard = Box<dyn SemaphoreGuard + 'static + Send>;
+
+/// Abstract async semaphore implementation
+pub trait Semaphore: 'static + Send + Sync {
+    /// Acquire a semaphore guard
+    fn acquire(&self) -> AqFut<'static, DynSemaphoreGuard>;
+}
+
+/// Abstract async semaphore implementation
+pub type DynSemaphore = Arc<dyn Semaphore + 'static + Send + Sync>;
+
 /// Sender type for a one_shot slot
 pub struct OnceSender<T: 'static + Send>(Box<dyn FnOnce(T) + 'static + Send>);
 
@@ -104,29 +122,31 @@ pub trait MultiSend<T: 'static + Send>: 'static + Send + Sync {
     fn acquire(&self) -> AqFut<'static, ChanResult<OnceSender<T>>>;
 }
 
-/// Sender type for a bound mpsc channel
-pub struct MultiSender<T: 'static + Send> {
-    send: Arc<dyn MultiSend<T> + 'static + Send + Sync>,
+/// Wrapper sender type for a bound mpsc channel that allows polling
+/// and in return is `!Sync`
+pub struct MultiSenderPoll<T: 'static + Send> {
+    send: MultiSender<T>,
     fut: Option<AqFut<'static, ChanResult<OnceSender<T>>>>,
 }
 
-impl<T: 'static + Send> Clone for MultiSender<T> {
-    fn clone(&self) -> Self {
-        MultiSender {
-            send: self.send.clone(),
+impl<T: 'static + Send> MultiSenderPoll<T> {
+    /// Construct a new multi sender poll instance
+    #[inline(always)]
+    pub fn new(sender: MultiSender<T>) -> Self {
+        Self {
+            send: sender,
             fut: None,
         }
     }
-}
 
-impl<T: 'static + Send> MultiSender<T> {
-    /// Construct a new multi sender instance
-    #[inline(always)]
-    pub fn new<S: MultiSend<T> + 'static + Send + Sync>(s: S) -> Self {
-        Self {
-            send: Arc::new(s),
-            fut: None,
-        }
+    /// Get a reference to the inner sender
+    pub fn as_inner(&self) -> &MultiSender<T> {
+        &self.send
+    }
+
+    /// Extract the inner sender
+    pub fn into_inner(self) -> MultiSender<T> {
+        self.send
     }
 
     /// Attempt to acquire a permit to send data into the channel.
@@ -148,6 +168,35 @@ impl<T: 'static + Send> MultiSender<T> {
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Ready(Ok(sender)) => Poll::Ready(Ok(sender)),
         }
+    }
+
+    /// Attempt to acquire a permit to send data into the channel.
+    /// The returned future is cancel safe in the sense that the queue
+    /// position awaiting a send permit will be released
+    #[inline(always)]
+    pub fn acquire(&self) -> AqFut<'static, ChanResult<OnceSender<T>>> {
+        self.send.acquire()
+    }
+}
+
+/// Sender type for a bound mpsc channel
+pub struct MultiSender<T: 'static + Send> {
+    send: Arc<dyn MultiSend<T> + 'static + Send + Sync>,
+}
+
+impl<T: 'static + Send> Clone for MultiSender<T> {
+    fn clone(&self) -> Self {
+        MultiSender {
+            send: self.send.clone(),
+        }
+    }
+}
+
+impl<T: 'static + Send> MultiSender<T> {
+    /// Construct a new multi sender instance
+    #[inline(always)]
+    pub fn new<S: MultiSend<T> + 'static + Send + Sync>(s: S) -> Self {
+        Self { send: Arc::new(s) }
     }
 
     /// Attempt to acquire a permit to send data into the channel.
