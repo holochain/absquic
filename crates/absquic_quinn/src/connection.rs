@@ -38,6 +38,8 @@ pin_project_lite::pin_project! {
         #[pin]
         transmit: ConTransmitDriver,
 
+        timer: Timer<Runtime>,
+
         #[pin]
         ep_evt: EpEvtDriver,
 
@@ -84,6 +86,8 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
 
         let transmit = ConTransmitDriver::new(udp_packet_send);
 
+        let timer = Timer::new();
+
         let ep_evt = EpEvtDriver::new(hnd, con_cmd_send.clone(), ep_cmd_send);
 
         let con_poll = ConPollDriver::new(con_evt_send);
@@ -100,6 +104,7 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
 
             con_cmd,
             transmit,
+            timer,
             ep_evt,
             con_poll,
         });
@@ -119,8 +124,6 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
         loop {
             more_work = false;
 
-            let now = std::time::Instant::now();
-
             // quinn_proto::Connection wants us to use the following order:
             //
             // A) simple getters (can be called whenever)
@@ -130,6 +133,14 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
             //    - 2) poll_timeout
             //    - 3) poll_endpoint_events
             //    - 4) poll
+
+            let now = if this.timer.should_trigger(cx) {
+                let now = std::time::Instant::now();
+                this.connection.handle_timeout(now);
+                now
+            } else {
+                std::time::Instant::now()
+            };
 
             // C - commands
             let mut con_cmd_want_close = false;
@@ -166,7 +177,10 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
                 &mut transmit_want_close,
             )?;
 
-            // TODO D.2 - poll_timeout
+            // D.2 - poll_timeout
+            if let Some(timeout) = this.connection.poll_timeout() {
+                this.timer.set_time(cx, timeout);
+            }
 
             // D.3 - poll_endpoint_events
             let mut ep_evt_want_close = false;
@@ -212,5 +226,57 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
         }
 
         Ok(())
+    }
+}
+
+struct Timer<Runtime: AsyncRuntime> {
+    inner: Option<(std::time::Instant, AqFut<'static, ()>)>,
+    _p: std::marker::PhantomData<Runtime>,
+}
+
+impl<Runtime: AsyncRuntime> Timer<Runtime> {
+    pub fn new() -> Self {
+        Timer {
+            inner: None,
+            _p: std::marker::PhantomData,
+        }
+    }
+
+    pub fn should_trigger(&mut self, cx: &mut Context<'_>) -> bool {
+        match self.inner.take() {
+            None => false,
+            Some((time, mut fut)) => match Pin::new(&mut fut).poll(cx) {
+                Poll::Pending => {
+                    self.inner = Some((time, fut));
+                    false
+                }
+                Poll::Ready(()) => true,
+            },
+        }
+    }
+
+    pub fn set_time(&mut self, cx: &mut Context<'_>, time: std::time::Instant) {
+        let (time, mut fut) = match self.inner.take() {
+            None => (time, Runtime::sleep(time)),
+            Some((cur_time, cur_fut)) => {
+                if time < cur_time {
+                    (time, Runtime::sleep(time))
+                } else {
+                    (cur_time, cur_fut)
+                }
+            }
+        };
+
+        match Pin::new(&mut fut).poll(cx) {
+            // this is the "correct" response
+            // which registers our waker with the timeout future
+            Poll::Pending => self.inner = Some((time, fut)),
+            // woops, we should manually trigger right away
+            // but we still need a stub future to be polled
+            Poll::Ready(()) => {
+                cx.waker().wake_by_ref();
+                self.inner = Some((time, AqFut::new(async {})))
+            }
+        }
     }
 }
