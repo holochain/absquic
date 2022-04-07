@@ -1,5 +1,7 @@
 //! Absquic_core runtime types
 
+use crate::backend::*;
+use crate::endpoint::*;
 use crate::*;
 use std::future::Future;
 use std::pin::Pin;
@@ -53,6 +55,34 @@ pub trait AsyncRuntime: 'static + Send + Sync {
     fn channel<T: 'static + Send>(
         bound: usize,
     ) -> (MultiSender<T>, MultiReceiver<T>);
+}
+
+/// Extension trait that allows construction of endpoints from runtime abstracts
+pub trait EndpointBuilder<Runtime: AsyncRuntime> {
+    /// Build an endpoint from a runtime abstract
+    fn build<Udp, Quic>(
+        udp_backend: Udp,
+        quic_backend: Quic,
+    ) -> AqFut<'static, AqResult<(Endpoint, MultiReceiver<EndpointEvt>)>>
+    where
+        Udp: UdpBackendFactory,
+        Quic: QuicBackendFactory;
+}
+
+impl<Runtime: AsyncRuntime> EndpointBuilder<Runtime> for Runtime {
+    #[inline(always)]
+    fn build<Udp, Quic>(
+        udp_backend: Udp,
+        quic_backend: Quic,
+    ) -> AqFut<'static, AqResult<(Endpoint, MultiReceiver<EndpointEvt>)>>
+    where
+        Udp: UdpBackendFactory,
+        Quic: QuicBackendFactory,
+    {
+        AqFut::new(async move {
+            Endpoint::new::<Runtime, Udp, Quic>(udp_backend, quic_backend).await
+        })
+    }
 }
 
 /// A completion handle to a spawned task.

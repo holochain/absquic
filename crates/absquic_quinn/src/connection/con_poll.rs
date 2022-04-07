@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 use super::*;
 
 pin_project_lite::pin_project! {
@@ -54,13 +55,18 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
                         }
                     }
                 }
+
+                #[allow(clippy::needless_bool)] // so we can comment...
                 if *this.con_evt_send_closed {
                     // continue to process events - letting them drop
                     false
-                } else {
+                } else if send_permit.is_none() {
                     // the channel is NOT closed, we got a pending,
                     // we need to break out of the loop
+                    //
                     true
+                } else {
+                    false
                 }
             };
 
@@ -121,13 +127,7 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             {
                 *more_work = true;
                 let (rb, rf) = read_stream_pair::<Runtime>(BYTES_CAP);
-                let info = StreamInfo {
-                    stream_id,
-                    read: Some(rb),
-                    readable: true,
-                    write: None,
-                    writable: false,
-                };
+                let info = StreamInfo::uni_in(stream_id, rb);
                 streams.insert(stream_id, info);
                 if let Some(send_permit) = send_permit.take() {
                     send_permit.send(ConnectionEvt::InUniStream(rf));
@@ -153,13 +153,7 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
                 *more_work = true;
                 let (wb, wf) = write_stream_pair::<Runtime>(BYTES_CAP);
                 let (rb, rf) = read_stream_pair::<Runtime>(BYTES_CAP);
-                let info = StreamInfo {
-                    stream_id,
-                    read: Some(rb),
-                    readable: true,
-                    write: Some(wb),
-                    writable: true,
-                };
+                let info = StreamInfo::bi(stream_id, rb, wb);
                 streams.insert(stream_id, info);
                 if let Some(send_permit) = send_permit.take() {
                     send_permit.send(ConnectionEvt::InBiStream(wf, rf));
@@ -183,6 +177,8 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
         send_permit: &mut Option<OnceSender<ConnectionEvt>>,
         evt: quinn_proto::Event,
     ) -> AqResult<()> {
+        tracing::trace!(?evt);
+
         use quinn_proto::StreamEvent;
         let mut try_send = |evt| {
             if let Some(send_permit) = send_permit.take() {
@@ -210,12 +206,12 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             }
             quinn_proto::Event::Stream(StreamEvent::Readable { id }) => {
                 if let Some(info) = streams.get_mut(&id) {
-                    info.readable = true;
+                    info.set_readable();
                 }
             }
             quinn_proto::Event::Stream(StreamEvent::Writable { id }) => {
                 if let Some(info) = streams.get_mut(&id) {
-                    info.writable = true;
+                    info.set_writable();
                 }
             }
             quinn_proto::Event::Stream(StreamEvent::Finished { id }) => {

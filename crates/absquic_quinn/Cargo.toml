@@ -28,6 +28,6 @@ tracing-subscriber = { version = "0.3.9", features = [ "env-filter" ] }
 default = []
 dev_utils = ["rcgen", "rustls/dangerous_configuration"]
 
-#[[bench]]
-#name = "quinn"
-#harness = false
+[[bench]]
+name = "quinn"
+harness = false

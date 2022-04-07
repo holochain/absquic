@@ -2,6 +2,8 @@ use super::*;
 
 pin_project_lite::pin_project! {
     pub struct CommandDriver<Runtime: AsyncRuntime> {
+        ep_uniq: usize,
+        max_gso_provider: MaxGsoProvider,
         client_config: Arc<quinn_proto::ClientConfig>,
         ep_cmd_send: MultiSenderPoll<EpCmd>,
         udp_packet_send: MultiSenderPoll<OutUdpPacket>,
@@ -16,6 +18,8 @@ pin_project_lite::pin_project! {
 
 impl<Runtime: AsyncRuntime> CommandDriver<Runtime> {
     pub fn new(
+        ep_uniq: usize,
+        max_gso_provider: MaxGsoProvider,
         client_config: Arc<quinn_proto::ClientConfig>,
         ep_cmd_send: MultiSender<EpCmd>,
         udp_packet_send: MultiSender<OutUdpPacket>,
@@ -23,6 +27,8 @@ impl<Runtime: AsyncRuntime> CommandDriver<Runtime> {
         udp_cmd_send: MultiSender<UdpBackendCmd>,
     ) -> Self {
         Self {
+            ep_uniq,
+            max_gso_provider,
             client_config,
             ep_cmd_send: MultiSenderPoll::new(ep_cmd_send),
             udp_packet_send: MultiSenderPoll::new(udp_packet_send),
@@ -77,6 +83,7 @@ impl<Runtime: AsyncRuntime> CommandDriver<Runtime> {
                     *more_work = true;
                     match evt {
                         EpCmd::EpEvt { hnd, evt, rsp } => {
+                            tracing::trace!(?hnd, "ep evt from con");
                             let res = endpoint.handle_event(hnd, evt);
                             rsp.send(res);
                         }
@@ -109,6 +116,8 @@ impl<Runtime: AsyncRuntime> CommandDriver<Runtime> {
                                 Ok((hnd, con)) => {
                                     let (con, con_cmd_send, con_recv) =
                                         <ConnectionDriver<Runtime>>::spawn(
+                                            *this.ep_uniq,
+                                            this.max_gso_provider.clone(),
                                             hnd,
                                             con,
                                             this.ep_cmd_send.as_inner().clone(),

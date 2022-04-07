@@ -16,26 +16,41 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
+/// MaxGsoProvider provider used by absquic_quinn
+pub type MaxGsoProvider = Arc<dyn Fn() -> usize + 'static + Send + Sync>;
+
 /// Absquic udp backend backed by the quinn-udp library
 pub struct QuinnUdpBackendFactory {
+    state: Arc<quinn_udp::UdpState>,
     addr: SocketAddr,
     max_udp_size: usize,
 }
 
 impl QuinnUdpBackendFactory {
     /// Construct a new quinn udp backend factory
-    pub fn new(addr: SocketAddr, max_udp_size: Option<usize>) -> Self {
+    pub fn new(
+        addr: SocketAddr,
+        max_udp_size: Option<usize>,
+    ) -> (Self, MaxGsoProvider) {
+        let state = Arc::new(quinn_udp::UdpState::new());
+        let state2 = state.clone();
+        let gso: MaxGsoProvider = Arc::new(move || state2.max_gso_segments());
         let max_udp_size = max_udp_size.unwrap_or_default();
-        Self {
-            addr,
-            max_udp_size: std::cmp::max(64 * 1024, max_udp_size),
-        }
+        (
+            Self {
+                state,
+                addr,
+                max_udp_size: std::cmp::max(64 * 1024, max_udp_size),
+            },
+            gso,
+        )
     }
 }
 
 impl UdpBackendFactory for QuinnUdpBackendFactory {
+    #[allow(clippy::type_complexity)]
     fn bind<Runtime: AsyncRuntime>(
-        &self,
+        self,
     ) -> AqFut<
         'static,
         AqResult<(
@@ -44,8 +59,11 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
             MultiReceiver<UdpBackendEvt>,
         )>,
     > {
-        let addr = self.addr;
-        let max_udp_size = self.max_udp_size;
+        let Self {
+            state,
+            addr,
+            max_udp_size,
+        } = self;
         AqFut::new(async move {
             let chan_size = std::cmp::max(8, quinn_udp::BATCH_SIZE) * 2;
 
@@ -60,6 +78,7 @@ impl UdpBackendFactory for QuinnUdpBackendFactory {
             tracing::info!(?addr, "udp bound");
 
             let driver = Driver::new(
+                state,
                 socket,
                 cmd_recv,
                 pak_in_recv,
@@ -99,6 +118,7 @@ impl Future for Driver {
 
 impl Driver {
     fn new(
+        state: Arc<quinn_udp::UdpState>,
         socket: quinn_udp::UdpSocket,
         cmd_recv: MultiReceiver<UdpBackendCmd>,
         pak_in_recv: MultiReceiver<OutUdpPacket>,
@@ -108,7 +128,7 @@ impl Driver {
         Self {
             socket,
             cmd_handler: CmdHandler::new(cmd_recv),
-            packet_sender: PacketSender::new(pak_in_recv),
+            packet_sender: PacketSender::new(state, pak_in_recv),
             packet_reader: PacketReader::new(max_udp_size, evt_send),
         }
     }
@@ -124,6 +144,7 @@ impl Driver {
         let mut more_work;
 
         let start = std::time::Instant::now();
+        let mut elapsed_ms;
         loop {
             more_work = false;
 
@@ -158,12 +179,15 @@ impl Driver {
                 return Err("QuinnUdpBackendDriverClosing".into());
             }
 
-            if !more_work || start.elapsed().as_millis() >= 10 {
+            elapsed_ms = start.elapsed().as_millis();
+            if !more_work || elapsed_ms >= 10 {
                 break;
             }
         }
 
-        tracing::trace!(elapsed_ms = %start.elapsed().as_millis(), "udp poll");
+        if elapsed_ms >= 20 {
+            tracing::warn!(%elapsed_ms, "long udp poll");
+        }
 
         if more_work {
             cx.waker().wake_by_ref();
@@ -235,8 +259,10 @@ struct PacketSender {
 }
 
 impl PacketSender {
-    fn new(pak_in_recv: MultiReceiver<OutUdpPacket>) -> Self {
-        let state = Arc::new(quinn_udp::UdpState::new());
+    fn new(
+        state: Arc<quinn_udp::UdpState>,
+        pak_in_recv: MultiReceiver<OutUdpPacket>,
+    ) -> Self {
         let buffer = VecDeque::with_capacity(quinn_udp::BATCH_SIZE);
         Self {
             state,

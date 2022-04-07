@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+#![allow(clippy::too_many_arguments)]
 use super::*;
 
 pin_project_lite::pin_project! {
@@ -96,13 +98,7 @@ impl<Runtime: AsyncRuntime> ConCmdDriver<Runtime> {
             {
                 *more_work = true;
                 let (wb, wf) = write_stream_pair::<Runtime>(BYTES_CAP);
-                let info = StreamInfo {
-                    stream_id,
-                    read: None,
-                    readable: false,
-                    write: Some(wb),
-                    writable: true,
-                };
+                let info = StreamInfo::uni_out(stream_id, wb);
                 streams.insert(stream_id, info);
                 let (rsp, _) = this.uni_queue.pop_front().unwrap();
                 rsp.send(Ok(wf));
@@ -123,13 +119,7 @@ impl<Runtime: AsyncRuntime> ConCmdDriver<Runtime> {
                 *more_work = true;
                 let (wb, wf) = write_stream_pair::<Runtime>(BYTES_CAP);
                 let (rb, rf) = read_stream_pair::<Runtime>(BYTES_CAP);
-                let info = StreamInfo {
-                    stream_id,
-                    read: Some(rb),
-                    readable: true,
-                    write: Some(wb),
-                    writable: true,
-                };
+                let info = StreamInfo::bi(stream_id, rb, wb);
                 streams.insert(stream_id, info);
                 let (rsp, _) = this.bi_queue.pop_front().unwrap();
                 rsp.send(Ok((wf, rf)));

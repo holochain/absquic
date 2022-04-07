@@ -23,6 +23,7 @@ type ConMap = HashMap<quinn_proto::ConnectionHandle, MultiSenderPoll<ConCmd>>;
 
 pin_project_lite::pin_project! {
     pub struct EndpointDriver<Runtime: AsyncRuntime> {
+        ep_uniq: usize,
         endpoint: quinn_proto::Endpoint,
         connections: ConMap,
 
@@ -52,6 +53,7 @@ impl<Runtime: AsyncRuntime> Future for EndpointDriver<Runtime> {
 
 impl<Runtime: AsyncRuntime> EndpointDriver<Runtime> {
     pub fn spawn(
+        max_gso_provider: MaxGsoProvider,
         client_config: Arc<quinn_proto::ClientConfig>,
         endpoint: quinn_proto::Endpoint,
         udp_cmd_send: MultiSender<UdpBackendCmd>,
@@ -64,10 +66,14 @@ impl<Runtime: AsyncRuntime> EndpointDriver<Runtime> {
 
         let ep_cmd_recv = futures_util::stream::select_all(vec![
             ep_cmd_recv.boxed(),
-            cmd_recv.map(|cmd| EpCmd::EpCmd(cmd)).boxed(),
+            cmd_recv.map(EpCmd::EpCmd).boxed(),
         ]);
 
+        let ep_uniq = uniq();
+
         let command = CommandDriver::new(
+            ep_uniq,
+            max_gso_provider.clone(),
             client_config,
             ep_cmd_send.clone(),
             udp_packet_send.clone(),
@@ -76,6 +82,8 @@ impl<Runtime: AsyncRuntime> EndpointDriver<Runtime> {
         );
 
         let udp_in = UdpInDriver::new(
+            ep_uniq,
+            max_gso_provider,
             ep_cmd_send,
             udp_packet_send.clone(),
             evt_send,
@@ -85,6 +93,7 @@ impl<Runtime: AsyncRuntime> EndpointDriver<Runtime> {
         let transmit = TransmitDriver::new(udp_packet_send);
 
         Runtime::spawn(Self {
+            ep_uniq,
             endpoint,
             connections: HashMap::new(),
 
@@ -102,9 +111,13 @@ impl<Runtime: AsyncRuntime> EndpointDriver<Runtime> {
     ) -> AqResult<()> {
         let mut this = self.project();
 
+        let _span =
+            tracing::error_span!("ep_poll", ep_uniq = ?this.ep_uniq).entered();
+
         let mut more_work;
 
         let start = std::time::Instant::now();
+        let mut elapsed_ms;
         loop {
             more_work = false;
 
@@ -138,12 +151,15 @@ impl<Runtime: AsyncRuntime> EndpointDriver<Runtime> {
                 return Err("QuinnEpDriverClosing".into());
             }
 
-            if !more_work || start.elapsed().as_millis() >= 10 {
+            elapsed_ms = start.elapsed().as_millis();
+            if !more_work || elapsed_ms >= 10 {
                 break;
             }
         }
 
-        tracing::trace!(elapsed_ms = %start.elapsed().as_millis(), "ep poll");
+        if elapsed_ms >= 20 {
+            tracing::warn!(%elapsed_ms, "long ep poll");
+        }
 
         if more_work {
             cx.waker().wake_by_ref();

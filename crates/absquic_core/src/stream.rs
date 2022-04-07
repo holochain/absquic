@@ -247,7 +247,7 @@ pub mod backend {
 
     pub(crate) enum WriteCmdInner {
         Data(bytes::Bytes, CounterAddPermit),
-        Stop(u64, Option<OnceSender<()>>),
+        Stop(u64),
     }
 
     /// WriteCmdData
@@ -327,7 +327,7 @@ pub mod backend {
     pub struct WriteStreamBackend {
         recv: MultiReceiver<WriteCmdInner>,
         buf: Option<WriteCmdInner>,
-        error_code: u64,
+        error_code: Arc<atomic::AtomicU64>,
         err: Arc<Mutex<Option<one_err::OneErr>>>,
     }
 
@@ -342,23 +342,16 @@ pub mod backend {
                 match self.recv.poll_recv(cx) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(None) => {
-                        return Poll::Ready(WriteCmdInner::Stop(
-                            self.error_code,
-                            None,
-                        ))
+                        let code =
+                            self.error_code.load(atomic::Ordering::Acquire);
+                        return Poll::Ready(WriteCmdInner::Stop(code));
                     }
                     Poll::Ready(Some(cmd)) => cmd,
                 }
             } {
+                stop @ WriteCmdInner::Stop(_) => Poll::Ready(stop),
                 WriteCmdInner::Data(b, _p) if b.is_empty() => {
                     self.poll_recv_inner(cx)
-                }
-                WriteCmdInner::Stop(error_code, send) => {
-                    self.error_code = error_code;
-                    if let Some(send) = send {
-                        send.send(());
-                    }
-                    Poll::Ready(WriteCmdInner::Stop(error_code, None))
                 }
                 WriteCmdInner::Data(b, p) => {
                     Poll::Ready(WriteCmdInner::Data(b, p))
@@ -376,9 +369,7 @@ pub mod backend {
                     data: Some(b),
                     permit: Some(p),
                 }),
-                WriteCmdInner::Stop(error_code, _) => {
-                    WriteCmd::Stop(error_code)
-                }
+                WriteCmdInner::Stop(error_code) => WriteCmd::Stop(error_code),
             }
         }
 
@@ -427,21 +418,21 @@ pub mod backend {
         // deserve to be limited
         let chan_size = std::cmp::max(8, buf_size / 8);
         let (send, recv) = Runtime::channel(chan_size);
-        let one_shot_unit = Box::new(|| Runtime::one_shot());
+        let error_code = Arc::new(atomic::AtomicU64::new(0));
         let err = Arc::new(Mutex::new(None));
         (
             WriteStreamBackend {
                 recv,
                 buf: None,
-                error_code: 0,
+                error_code: error_code.clone(),
                 err: err.clone(),
             },
             WriteStream {
                 counter,
                 send: MultiSenderPoll::new(send),
                 sender: None,
+                error_code,
                 err,
-                one_shot_unit,
             },
         )
     }
@@ -541,19 +532,13 @@ impl ReadStream {
     }
 }
 
-type OnceChan<T> = Box<
-    dyn Fn() -> (OnceSender<T>, AqFut<'static, Option<T>>) + 'static + Send,
->;
-
 /// Quic write stream
 pub struct WriteStream {
     counter: Counter,
     send: MultiSenderPoll<WriteCmdInner>,
     sender: Option<OnceSender<WriteCmdInner>>,
+    error_code: Arc<atomic::AtomicU64>,
     err: Arc<Mutex<Option<one_err::OneErr>>>,
-
-    // avoid having the runtime generic on this type
-    one_shot_unit: OnceChan<()>,
 }
 
 impl WriteStream {
@@ -632,12 +617,8 @@ impl WriteStream {
     }
 
     /// Stop this write channel with error_code
-    pub async fn stop(self, error_code: u64) {
-        if let Ok(send) = self.send.acquire().await {
-            let (s, r) = (self.one_shot_unit)();
-            send.send(WriteCmdInner::Stop(error_code, Some(s)));
-            r.await;
-        }
+    pub fn stop(self, error_code: u64) {
+        self.error_code.store(error_code, atomic::Ordering::Release);
     }
 }
 

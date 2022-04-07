@@ -23,6 +23,9 @@ pub type StreamMap = HashMap<quinn_proto::StreamId, StreamInfo>;
 
 pin_project_lite::pin_project! {
     pub struct ConnectionDriver<Runtime: AsyncRuntime> {
+        ep_uniq: usize,
+        con_uniq: usize,
+
         connection: quinn_proto::Connection,
 
         inbound_datagrams: bool,
@@ -63,6 +66,8 @@ impl<Runtime: AsyncRuntime> Future for ConnectionDriver<Runtime> {
 
 impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
     pub fn spawn(
+        ep_uniq: usize,
+        max_gso_provider: MaxGsoProvider,
         hnd: quinn_proto::ConnectionHandle,
         connection: quinn_proto::Connection,
         ep_cmd_send: MultiSender<EpCmd>,
@@ -79,12 +84,13 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
 
         let con_cmd_recv = futures_util::stream::select_all(vec![
             con_cmd_recv.boxed(),
-            cmd_recv.map(|cmd| ConCmd::ConCmd(cmd)).boxed(),
+            cmd_recv.map(ConCmd::ConCmd).boxed(),
         ]);
 
         let con_cmd = ConCmdDriver::new(con_cmd_recv);
 
-        let transmit = ConTransmitDriver::new(udp_packet_send);
+        let transmit =
+            ConTransmitDriver::new(max_gso_provider, udp_packet_send);
 
         let timer = Timer::new();
 
@@ -93,6 +99,9 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
         let con_poll = ConPollDriver::new(con_evt_send);
 
         Runtime::spawn(Self {
+            ep_uniq,
+            con_uniq: uniq(),
+
             connection,
 
             inbound_datagrams: true,
@@ -118,9 +127,17 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
     ) -> AqResult<()> {
         let mut this = self.project();
 
+        let _span = tracing::error_span!(
+            "con_poll",
+            ep_uniq = ?this.ep_uniq,
+            con_uniq = ?this.con_uniq,
+        )
+        .entered();
+
         let mut more_work;
 
         let start = std::time::Instant::now();
+        let mut elapsed_ms;
         loop {
             more_work = false;
 
@@ -214,12 +231,15 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
                 return Err("QuinnConDriverClosing".into());
             }
 
-            if !more_work || start.elapsed().as_millis() >= 10 {
+            elapsed_ms = start.elapsed().as_millis();
+            if !more_work || elapsed_ms >= 10 {
                 break;
             }
         }
 
-        tracing::trace!(elapsed_ms = %start.elapsed().as_millis(), "con poll");
+        if elapsed_ms >= 20 {
+            tracing::warn!(%elapsed_ms, "long con poll");
+        }
 
         if more_work {
             cx.waker().wake_by_ref();

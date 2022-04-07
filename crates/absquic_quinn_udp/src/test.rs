@@ -13,8 +13,8 @@ async fn test_udp<Runtime: AsyncRuntime>() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    let factory = QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
-
+    let (factory, _) =
+        QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
     let (cmd1, send1, recv1) = factory.bind::<TokioRuntime>().await.unwrap();
     let (s, r) = Runtime::one_shot();
     cmd1.acquire()
@@ -24,6 +24,8 @@ async fn test_udp<Runtime: AsyncRuntime>() {
     let addr1 = r.await.unwrap().unwrap();
     tracing::warn!("addr1: {:?}", addr1);
 
+    let (factory, _) =
+        QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
     let (cmd2, send2, mut recv2) =
         factory.bind::<TokioRuntime>().await.unwrap();
     let (s, r) = Runtime::one_shot();

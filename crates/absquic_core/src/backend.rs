@@ -87,7 +87,7 @@ pub enum UdpBackendEvt {
 pub trait UdpBackendFactory: 'static + Send + Sync {
     /// Bind a new udp backend socket
     fn bind<Runtime: AsyncRuntime>(
-        &self,
+        self,
     ) -> AqFut<
         'static,
         AqResult<(
@@ -102,7 +102,7 @@ pub trait UdpBackendFactory: 'static + Send + Sync {
 pub trait QuicBackendFactory: 'static + Send + Sync {
     /// Bind a new absquic backend
     fn bind<Runtime: AsyncRuntime, Udp: UdpBackendFactory>(
-        &self,
+        self,
         udp_backend: Udp,
     ) -> AqFut<
         'static,

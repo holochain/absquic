@@ -1,13 +1,36 @@
-//! `feature = "tokio_runtime"` Absquic_core tokio runtime
+//! `feature = "tokio_runtime"` Absquic_core AsyncRuntime backed by tokio
 
+use crate::backend::*;
+use crate::endpoint::*;
 use crate::runtime::*;
 use crate::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Absquic AsyncRuntime backed by tokio
+/// `feature = "tokio_runtime"` Absquic_core AsyncRuntime backed by tokio
 pub struct TokioRuntime;
+
+impl TokioRuntime {
+    /// Build an endpoint from the TokioRuntime abstract.
+    /// This convenience function just makes it so you don't have to
+    /// explicitly `use EndpointBuilder;`
+    #[inline(always)]
+    pub async fn build_endpoint<Udp, Quic>(
+        udp_backend: Udp,
+        quic_backend: Quic,
+    ) -> AqResult<(Endpoint, MultiReceiver<EndpointEvt>)>
+    where
+        Udp: UdpBackendFactory,
+        Quic: QuicBackendFactory,
+    {
+        <TokioRuntime as EndpointBuilder<TokioRuntime>>::build(
+            udp_backend,
+            quic_backend,
+        )
+        .await
+    }
+}
 
 impl AsyncRuntime for TokioRuntime {
     fn spawn<R, F>(f: F) -> SpawnHnd<R>

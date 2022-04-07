@@ -1,5 +1,9 @@
+use absquic_core::connection::*;
 use absquic_core::deps::bytes;
 use absquic_core::deps::parking_lot::Mutex;
+use absquic_core::endpoint::*;
+use absquic_core::runtime::*;
+use absquic_core::stream::*;
 use absquic_quinn::dev_utils;
 use criterion::*;
 use std::net::SocketAddr;
@@ -7,7 +11,7 @@ use std::sync::Arc;
 
 enum MetaSend {
     Quinn(quinn::SendStream),
-    Abs(absquic_core::stream::WriteStream),
+    Abs(WriteStream),
 }
 
 impl MetaSend {
@@ -28,7 +32,7 @@ impl MetaSend {
 
 enum MetaRecv {
     Quinn(quinn::RecvStream),
-    Abs(absquic_core::stream::ReadStream),
+    Abs(ReadStream),
 }
 
 impl MetaRecv {
@@ -49,7 +53,7 @@ impl MetaRecv {
 
 enum MetaCon {
     Quinn(quinn::Connection),
-    Abs(absquic_core::connection::Connection),
+    Abs(Connection),
 }
 
 impl MetaCon {
@@ -67,7 +71,7 @@ impl MetaCon {
 
 enum MetaInUni {
     Quinn(quinn::IncomingUniStreams),
-    Abs(absquic_core::connection::ConnectionRecv),
+    Abs(MultiReceiver<ConnectionEvt>),
 }
 
 impl MetaInUni {
@@ -89,7 +93,7 @@ impl MetaInUni {
 
 enum MetaEndpoint {
     Quinn(quinn::Endpoint),
-    Abs(absquic_core::endpoint::Endpoint),
+    Abs(Endpoint),
 }
 
 impl MetaEndpoint {
@@ -114,7 +118,7 @@ impl MetaEndpoint {
 
 enum MetaInCon {
     Quinn(quinn::Incoming),
-    Abs(absquic_core::endpoint::EndpointRecv),
+    Abs(MultiReceiver<EndpointEvt>),
 }
 
 impl MetaInCon {
@@ -154,25 +158,26 @@ async fn bind_ep(q: bool) -> (MetaEndpoint, MetaInCon, SocketAddr) {
         let addr = ep.local_addr().unwrap();
         (MetaEndpoint::Quinn(ep), MetaInCon::Quinn(recv), addr)
     } else {
-        let udp_factory = absquic_quinn_udp::QuinnUdpBackendFactory::new(
+        let (udp_factory, gso) = absquic_quinn_udp::QuinnUdpBackendFactory::new(
             ([127, 0, 0, 1], 0).into(),
             None,
         );
 
-        let quic_factory = absquic_quinn::QuinnDriverFactory::new(
+        let quic_factory = absquic_quinn::QuinnQuicBackendFactory::new(
+            gso,
             quinn_proto::EndpointConfig::default(),
             Some(srv),
             cli,
         );
 
-        let ep_factory = absquic_core::endpoint::EndpointFactory::new(
-            udp_factory,
-            quic_factory,
-        );
+        let (ep, recv) =
+            absquic_core::tokio_runtime::TokioRuntime::build_endpoint(
+                udp_factory,
+                quic_factory,
+            )
+            .await
+            .unwrap();
 
-        let (mut ep, recv, driver) =
-            ep_factory.bind(T::default()).await.unwrap();
-        tokio::task::spawn(driver);
         let addr = ep.local_address().await.unwrap();
         (MetaEndpoint::Abs(ep), MetaInCon::Abs(recv), addr)
     }
@@ -235,6 +240,7 @@ impl Test {
             let uni = uni_streams.recv().await;
             let data = uni.read_to_end().await;
 
+            assert_eq!(data_ref.len(), data.len());
             assert_eq!(data_ref.as_slice(), data.as_slice());
 
             drop(uni_streams);
@@ -308,27 +314,3 @@ fn criterion_benchmark(c: &mut Criterion) {
 
 criterion_group!(benches, criterion_benchmark);
 criterion_main!(benches);
-
-struct T(Option<tokio::task::JoinHandle<()>>);
-
-impl Default for T {
-    fn default() -> Self {
-        Self(None)
-    }
-}
-
-impl absquic_core::endpoint::TimeoutsScheduler for T {
-    fn schedule(
-        &mut self,
-        logic: Box<dyn FnOnce() + 'static + Send>,
-        at: std::time::Instant,
-    ) {
-        if let Some(t) = self.0.take() {
-            t.abort();
-        }
-        self.0 = Some(tokio::task::spawn(async move {
-            tokio::time::sleep_until(at.into()).await;
-            logic();
-        }));
-    }
-}

@@ -33,7 +33,7 @@ impl TransmitDriver {
             match this.udp_packet_send.poll_acquire(cx) {
                 Poll::Pending => return Ok(()),
                 Poll::Ready(Err(_)) => {
-                    tracing::debug!("tx udp send closed");
+                    tracing::debug!("ep udp send closed");
                     *this.udp_packet_send_closed = true;
                     *want_close = true;
                     return Ok(());

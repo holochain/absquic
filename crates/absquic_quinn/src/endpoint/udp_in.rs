@@ -12,6 +12,8 @@ type ConEvtMap = HashMap<
 
 pin_project_lite::pin_project! {
     pub struct UdpInDriver<Runtime: AsyncRuntime> {
+        ep_uniq: usize,
+        max_gso_provider: MaxGsoProvider,
         ep_cmd_send: MultiSenderPoll<EpCmd>,
         udp_packet_send: MultiSenderPoll<OutUdpPacket>,
         evt_send: MultiSenderPoll<EndpointEvt>,
@@ -26,12 +28,16 @@ pin_project_lite::pin_project! {
 
 impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
     pub fn new(
+        ep_uniq: usize,
+        max_gso_provider: MaxGsoProvider,
         ep_cmd_send: MultiSender<EpCmd>,
         udp_packet_send: MultiSender<OutUdpPacket>,
         evt_send: MultiSender<EndpointEvt>,
         udp_packet_recv: MultiReceiver<UdpBackendEvt>,
     ) -> Self {
         Self {
+            ep_uniq,
+            max_gso_provider,
             ep_cmd_send: MultiSenderPoll::new(ep_cmd_send),
             udp_packet_send: MultiSenderPoll::new(udp_packet_send),
             evt_send: MultiSenderPoll::new(evt_send),
@@ -63,6 +69,8 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
     }
 
     fn register_con(
+        ep_uniq: usize,
+        max_gso_provider: MaxGsoProvider,
         ep_cmd_send: MultiSender<EpCmd>,
         udp_packet_send: MultiSender<OutUdpPacket>,
         connections: &mut ConMap,
@@ -70,6 +78,8 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
         con: quinn_proto::Connection,
     ) -> (Connection, MultiReceiver<ConnectionEvt>) {
         let (con, con_cmd_send, con_recv) = <ConnectionDriver<Runtime>>::spawn(
+            ep_uniq,
+            max_gso_provider,
             hnd,
             con,
             ep_cmd_send,
@@ -99,6 +109,8 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
             ) {
                 let (hnd, con) = this.new_con_buf.pop_front().unwrap();
                 let (con, con_recv) = Self::register_con(
+                    *this.ep_uniq,
+                    this.max_gso_provider.clone(),
                     this.ep_cmd_send.as_inner().clone(),
                     this.udp_packet_send.as_inner().clone(),
                     connections,
@@ -106,6 +118,7 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
                     con,
                 );
                 sender.send(EndpointEvt::InConnection(con, con_recv));
+                tracing::debug!(?hnd, "new connection");
             } else {
                 return;
             }
@@ -123,7 +136,7 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
 
         for (hnd, evt_list) in this.con_evt_buf.iter_mut() {
             let mut rm_con = false;
-            if let Some(send) = connections.get_mut(&hnd) {
+            if let Some(send) = connections.get_mut(hnd) {
                 while !evt_list.is_empty() {
                     match send.poll_acquire(cx) {
                         Poll::Pending => break,
@@ -135,6 +148,7 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
                             sender.send(ConCmd::ConEvt(
                                 evt_list.pop_front().unwrap(),
                             ));
+                            tracing::trace!(?hnd, "con_event");
                         }
                     }
                 }
@@ -146,7 +160,8 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
             }
             if rm_con {
                 rm_buf.push(*hnd);
-                connections.remove(&hnd);
+                tracing::debug!(?hnd, "remove con");
+                connections.remove(hnd);
             }
         }
 
@@ -236,6 +251,7 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
                                                     rm_con = true;
                                                 }
                                                 Poll::Ready(Ok(sender)) => {
+                                                    tracing::trace!(?hnd, "con_event");
                                                     sender.send(ConCmd::ConEvt(
                                                         evt
                                                     ));
@@ -247,6 +263,7 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
                                             // to send it to
                                         }
                                         if rm_con {
+                                            tracing::debug!(?hnd, "remove con");
                                             connections.remove(&hnd);
                                         }
                                     }
@@ -258,6 +275,8 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
                                             this.new_con_buf,
                                         ) {
                                             let (con, con_recv) = Self::register_con(
+                                                *this.ep_uniq,
+                                                this.max_gso_provider.clone(),
                                                 this.ep_cmd_send.as_inner().clone(),
                                                 this.udp_packet_send.as_inner().clone(),
                                                 connections,
@@ -265,6 +284,7 @@ impl<Runtime: AsyncRuntime> UdpInDriver<Runtime> {
                                                 con,
                                             );
                                             sender.send(EndpointEvt::InConnection(con, con_recv));
+                                            tracing::debug!(?hnd, "new connection");
                                         } else {
                                             this.new_con_buf.push_back((hnd, con));
                                             in_packet_space -= 1;

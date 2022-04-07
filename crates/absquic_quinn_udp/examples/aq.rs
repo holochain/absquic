@@ -38,9 +38,12 @@ async fn gen_sock<Runtime: AsyncRuntime>(
 ) -> (Sock, SockSend, SockRecv) {
     let data = vec![0xdb; len].into_boxed_slice();
 
-    let factory = QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
-
+    let (factory, _) =
+        QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
     let (_c1, s1, r1) = factory.bind::<TokioRuntime>().await.unwrap();
+
+    let (factory, _) =
+        QuinnUdpBackendFactory::new(([127, 0, 0, 1], 0).into(), None);
     let (c2, s2, r2) = factory.bind::<TokioRuntime>().await.unwrap();
 
     let recv_addr = c2.get_local_address::<Runtime>().await.unwrap();

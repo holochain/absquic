@@ -1,16 +1,69 @@
 use super::*;
 
 pub struct StreamInfo {
-    pub(crate) stream_id: quinn_proto::StreamId,
+    s_uniq: usize,
 
-    pub(crate) read: Option<ReadStreamBackend>,
-    pub(crate) readable: bool,
+    stream_id: quinn_proto::StreamId,
 
-    pub(crate) write: Option<WriteStreamBackend>,
-    pub(crate) writable: bool,
+    read: Option<ReadStreamBackend>,
+    readable: bool,
+
+    write: Option<WriteStreamBackend>,
+    writable: bool,
 }
 
 impl StreamInfo {
+    pub fn uni_in(
+        stream_id: quinn_proto::StreamId,
+        read: ReadStreamBackend,
+    ) -> Self {
+        Self {
+            s_uniq: uniq(),
+            stream_id,
+            read: Some(read),
+            readable: true,
+            write: None,
+            writable: false,
+        }
+    }
+
+    pub fn uni_out(
+        stream_id: quinn_proto::StreamId,
+        write: WriteStreamBackend,
+    ) -> Self {
+        Self {
+            s_uniq: uniq(),
+            stream_id,
+            read: None,
+            readable: false,
+            write: Some(write),
+            writable: true,
+        }
+    }
+
+    pub fn bi(
+        stream_id: quinn_proto::StreamId,
+        read: ReadStreamBackend,
+        write: WriteStreamBackend,
+    ) -> Self {
+        Self {
+            s_uniq: uniq(),
+            stream_id,
+            read: Some(read),
+            readable: true,
+            write: Some(write),
+            writable: true,
+        }
+    }
+
+    pub fn set_readable(&mut self) {
+        self.readable = true;
+    }
+
+    pub fn set_writable(&mut self) {
+        self.writable = true;
+    }
+
     pub fn finish(mut self) {
         self.read.take();
         self.write.take();
@@ -31,6 +84,12 @@ impl StreamInfo {
         connection: &mut quinn_proto::Connection,
         remove_stream: &mut bool,
     ) -> AqResult<()> {
+        let _span = tracing::error_span!(
+            "s_poll",
+            s_uniq = ?self.s_uniq,
+        )
+        .entered();
+
         if self.readable && self.read.is_some() {
             self.read(cx, connection)?;
         }
@@ -40,6 +99,7 @@ impl StreamInfo {
         }
 
         if self.read.is_none() && self.write.is_none() {
+            tracing::trace!("remove stream");
             *remove_stream = true;
         }
 
@@ -57,7 +117,10 @@ impl StreamInfo {
         // let's make sure we can get a permit to send
         // on the reader backend first
         let mut permit = match rb.poll_acquire(cx) {
-            Poll::Pending => return Ok(()),
+            Poll::Pending => {
+                self.read = Some(rb);
+                return Ok(());
+            }
             Poll::Ready(Err(code)) => {
                 if let Ok(code) = quinn_proto::VarInt::from_u64(code) {
                     let _ = connection.recv_stream(self.stream_id).stop(code);
@@ -72,45 +135,51 @@ impl StreamInfo {
         let mut stop_err = None;
         let mut stop_code = None;
         match recv_stream.read(true) {
-            Err(_) => {
+            Err(err) => {
+                stop_err = Some(one_err::OneErr::new(err));
                 remove = true;
             }
-            Ok(mut chunks) => loop {
-                if permit.is_none() {
-                    match rb.poll_acquire(cx) {
-                        Poll::Pending => break,
-                        Poll::Ready(Err(code)) => {
-                            stop_code = Some(code);
+            Ok(mut chunks) => {
+                loop {
+                    if permit.is_none() {
+                        match rb.poll_acquire(cx) {
+                            Poll::Pending => break,
+                            Poll::Ready(Err(code)) => {
+                                stop_code = Some(code);
+                                remove = true;
+                                break;
+                            }
+                            Poll::Ready(Ok(p)) => permit = Some(p),
+                        };
+                    }
+                    let p = permit.take().unwrap();
+                    match chunks.next(p.max_len()) {
+                        Err(quinn_proto::ReadError::Blocked) => {
+                            self.readable = false;
+                            break;
+                        }
+                        Err(err) => {
+                            stop_err = Some(one_err::OneErr::new(err));
                             remove = true;
                             break;
                         }
-                        Poll::Ready(Ok(p)) => permit = Some(p),
-                    };
-                }
-                let p = permit.take().unwrap();
-                match chunks.next(p.max_len()) {
-                    Err(quinn_proto::ReadError::Blocked) => {
-                        self.readable = false;
-                        break;
-                    }
-                    Err(err) => {
-                        stop_err = Some(one_err::OneErr::new(err));
-                        remove = true;
-                        break;
-                    }
-                    Ok(None) => {
-                        remove = true;
-                        break;
-                    }
-                    Ok(Some(chunk)) => {
-                        if chunk.bytes.len() > p.max_len() {
-                            panic!("unexpected large chunk");
+                        Ok(None) => {
+                            remove = true;
+                            break;
                         }
+                        Ok(Some(chunk)) => {
+                            if chunk.bytes.len() > p.max_len() {
+                                panic!("unexpected large chunk");
+                            }
 
-                        p.send(chunk.bytes);
+                            p.send(chunk.bytes);
+                        }
                     }
                 }
-            },
+
+                // at the moment we *always* check transmit
+                let _ = chunks.finalize();
+            }
         }
 
         if let Some(code) = stop_code {

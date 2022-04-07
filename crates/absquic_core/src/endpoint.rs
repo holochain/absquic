@@ -67,7 +67,7 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// Construct a new absquic endpoint
-    pub async fn new<Runtime, Udp, Quic>(
+    pub(crate) async fn new<Runtime, Udp, Quic>(
         udp_backend: Udp,
         quic_backend: Quic,
     ) -> AqResult<(Self, MultiReceiver<EndpointEvt>)>

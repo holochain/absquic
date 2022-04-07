@@ -2,14 +2,19 @@ use super::*;
 
 pin_project_lite::pin_project! {
     pub struct ConTransmitDriver {
+        max_gso_provider: MaxGsoProvider,
         udp_packet_send: MultiSenderPoll<OutUdpPacket>,
         udp_packet_send_closed: bool,
     }
 }
 
 impl ConTransmitDriver {
-    pub fn new(udp_packet_send: MultiSender<OutUdpPacket>) -> Self {
+    pub fn new(
+        max_gso_provider: MaxGsoProvider,
+        udp_packet_send: MultiSender<OutUdpPacket>,
+    ) -> Self {
         Self {
+            max_gso_provider,
             udp_packet_send: MultiSenderPoll::new(udp_packet_send),
             udp_packet_send_closed: false,
         }
@@ -34,14 +39,14 @@ impl ConTransmitDriver {
             match this.udp_packet_send.poll_acquire(cx) {
                 Poll::Pending => return Ok(()),
                 Poll::Ready(Err(_)) => {
-                    tracing::debug!("tx udp send closed");
+                    tracing::debug!("con udp send closed");
                     *this.udp_packet_send_closed = true;
                     *want_close = true;
                     return Ok(());
                 }
                 Poll::Ready(Ok(sender)) => {
-                    // TODO - FIX MAX GSO!!! FIXME
-                    if let Some(transmit) = connection.poll_transmit(now, 1) {
+                    let gso = (this.max_gso_provider)();
+                    if let Some(transmit) = connection.poll_transmit(now, gso) {
                         let quinn_proto::Transmit {
                             destination,
                             ecn,
