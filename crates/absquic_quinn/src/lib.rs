@@ -39,8 +39,11 @@ pub use quinn_proto::ClientConfig as QuinnClientConfig;
 pub use quinn_proto::EndpointConfig as QuinnEndpointConfig;
 pub use quinn_proto::ServerConfig as QuinnServerConfig;
 
+// buffer size for inter-endpoint/connection channels
+const CHAN_CAP: usize = 64;
+
 // buffer size for read / write streams - arbitrary, needs experiments
-const BYTES_CAP: usize = 1024 * 16;
+const BYTES_CAP: usize = 1024 * 64;
 
 #[cfg(any(test, feature = "dev_utils"))]
 pub mod dev_utils;

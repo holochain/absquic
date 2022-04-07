@@ -23,6 +23,19 @@ impl<B: bytes::Buf + Sized> BufList<B> {
     pub fn push_back(&mut self, b: B) {
         self.0.push_back(b);
     }
+
+    /// Write represented bytes to a new `Vec<u8>`
+    pub fn into_vec(mut self) -> Vec<u8> {
+        use bytes::Buf;
+        let mut out = Vec::with_capacity(self.remaining());
+        while self.has_remaining() {
+            let chunk = self.chunk();
+            out.extend_from_slice(chunk);
+            let len = chunk.len();
+            self.advance(len);
+        }
+        out
+    }
 }
 
 impl<B: bytes::Buf + Sized> bytes::Buf for BufList<B> {

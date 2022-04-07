@@ -32,6 +32,29 @@ impl<Runtime: AsyncRuntime> ConCmdDriver<Runtime> {
         }
     }
 
+    fn register_uni(
+        streams: &mut StreamMap,
+        stream_id: quinn_proto::StreamId,
+        rsp: OnceSender<AqResult<WriteStream>>,
+    ) {
+        let (wb, wf) = write_stream_pair::<Runtime>(BYTES_CAP);
+        let info = StreamInfo::uni_out(stream_id, wb);
+        streams.insert(stream_id, info);
+        rsp.send(Ok(wf));
+    }
+
+    fn register_bi(
+        streams: &mut StreamMap,
+        stream_id: quinn_proto::StreamId,
+        rsp: OnceSender<AqResult<(WriteStream, ReadStream)>>,
+    ) {
+        let (wb, wf) = write_stream_pair::<Runtime>(BYTES_CAP);
+        let (rb, rf) = read_stream_pair::<Runtime>(BYTES_CAP);
+        let info = StreamInfo::bi(stream_id, rb, wb);
+        streams.insert(stream_id, info);
+        rsp.send(Ok((wf, rf)));
+    }
+
     pub fn poll(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -51,16 +74,45 @@ impl<Runtime: AsyncRuntime> ConCmdDriver<Runtime> {
             return Ok(());
         }
 
-        for _ in 0..32 {
+        while !this.uni_queue.is_empty() && *outbound_uni {
+            if let Some(stream_id) =
+                connection.streams().open(quinn_proto::Dir::Uni)
+            {
+                let (rsp, _) = this.uni_queue.pop_front().unwrap();
+                Self::register_uni(streams, stream_id, rsp);
+            } else {
+                *outbound_uni = false;
+                break;
+            }
+        }
+
+        while !this.bi_queue.is_empty() && *outbound_bi {
+            if let Some(stream_id) =
+                connection.streams().open(quinn_proto::Dir::Bi)
+            {
+                let (rsp, _) = this.bi_queue.pop_front().unwrap();
+                Self::register_bi(streams, stream_id, rsp);
+            } else {
+                *outbound_bi = false;
+                break;
+            }
+        }
+
+        let mut got_pending = false;
+        let start = std::time::Instant::now();
+        let mut elapsed_ms = 0;
+        for _ in 0..CHAN_CAP {
             match this.con_cmd_recv.as_mut().poll_next(cx) {
-                Poll::Pending => break,
+                Poll::Pending => {
+                    got_pending = true;
+                    break;
+                }
                 Poll::Ready(None) => {
                     *this.con_cmd_recv_closed = true;
                     *want_close = true;
                     return Ok(());
                 }
                 Poll::Ready(Some(evt)) => {
-                    *more_work = true;
                     match evt {
                         ConCmd::ConEvt(evt) => {
                             connection.handle_event(evt);
@@ -75,58 +127,46 @@ impl<Runtime: AsyncRuntime> ConCmdDriver<Runtime> {
                             rsp,
                             guard,
                         )) => {
+                            if *outbound_uni {
+                                if let Some(stream_id) = connection.streams().open(quinn_proto::Dir::Uni) {
+                                    Self::register_uni(streams, stream_id, rsp);
+                                    continue;
+                                }
+                            }
+                            *outbound_uni = false;
                             this.uni_queue.push_back((rsp, guard));
                         }
                         ConCmd::ConCmd(ConnectionCmd::OpenBiStream(
                             rsp,
                             guard,
                         )) => {
+                            if *outbound_bi {
+                                if let Some(stream_id) = connection.streams().open(quinn_proto::Dir::Bi) {
+                                    Self::register_bi(streams, stream_id, rsp);
+                                    continue;
+                                }
+                            }
+                            *outbound_bi = false;
                             this.bi_queue.push_back((rsp, guard));
                         }
                     }
                 }
             }
-        }
 
-        while !this.uni_queue.is_empty() {
-            if !*outbound_uni {
-                break;
-            }
-
-            if let Some(stream_id) =
-                connection.streams().open(quinn_proto::Dir::Uni)
-            {
-                *more_work = true;
-                let (wb, wf) = write_stream_pair::<Runtime>(BYTES_CAP);
-                let info = StreamInfo::uni_out(stream_id, wb);
-                streams.insert(stream_id, info);
-                let (rsp, _) = this.uni_queue.pop_front().unwrap();
-                rsp.send(Ok(wf));
-            } else {
-                *outbound_uni = false;
+            elapsed_ms = start.elapsed().as_millis();
+            if elapsed_ms >= 2 {
                 break;
             }
         }
 
-        while !this.bi_queue.is_empty() {
-            if !*outbound_bi {
-                break;
-            }
+        if elapsed_ms >= 3 {
+            tracing::warn!(%elapsed_ms, "long con cmd poll");
+        }
 
-            if let Some(stream_id) =
-                connection.streams().open(quinn_proto::Dir::Bi)
-            {
-                *more_work = true;
-                let (wb, wf) = write_stream_pair::<Runtime>(BYTES_CAP);
-                let (rb, rf) = read_stream_pair::<Runtime>(BYTES_CAP);
-                let info = StreamInfo::bi(stream_id, rb, wb);
-                streams.insert(stream_id, info);
-                let (rsp, _) = this.bi_queue.pop_front().unwrap();
-                rsp.send(Ok((wf, rf)));
-            } else {
-                *outbound_bi = false;
-                break;
-            }
+        // if we got pending, there is no more work
+        if !got_pending {
+            // otherwise:
+            *more_work = true;
         }
 
         Ok(())

@@ -1,7 +1,6 @@
 #![cfg(not(loom))]
 
 use absquic_core::connection::*;
-use absquic_core::deps::bytes;
 use absquic_core::endpoint::*;
 use absquic_core::runtime::*;
 use absquic_core::tokio_runtime::*;
@@ -9,7 +8,7 @@ use absquic_quinn::*;
 use absquic_quinn_udp::*;
 use std::net::SocketAddr;
 
-const CNT: usize = 10;
+const CNT: usize = 1; // TODO - put me back to 10
 const BYTES: &[u8] = &[0xdb; 200 * 1024];
 
 async fn bind() -> (Endpoint, MultiReceiver<EndpointEvt>) {
@@ -122,23 +121,22 @@ async fn run_con(
         while let Some(evt) = rcv.recv().await {
             match evt {
                 ConnectionEvt::Error(e) => panic!("{:?}", e),
-                ConnectionEvt::InUniStream(mut r) => {
+                ConnectionEvt::InUniStream(r) => {
                     tracing::debug!("incoming uni stream");
                     all.push(tokio::task::spawn(async move {
-                        let mut full_buf = bytes::BytesMut::new();
-                        while let Some(bytes) = r.read_bytes(usize::MAX).await {
-                            let bytes = bytes.unwrap();
-                            full_buf.extend_from_slice(bytes.as_ref());
-                        }
-                        assert_eq!(full_buf.len(), BYTES.len());
-                        assert_eq!(full_buf.as_ref(), BYTES);
+                        let start = std::time::Instant::now();
+                        let buf_list = r.read_to_end(usize::MAX).await.unwrap();
                         tracing::info!(
+                            elapsed_ms = %start.elapsed().as_millis(),
                             "READ SUCCESS {}",
                             READ_COUNT.fetch_add(
                                 1,
                                 std::sync::atomic::Ordering::SeqCst
                             ) + 1
                         );
+                        let full_buf = buf_list.into_vec();
+                        assert_eq!(full_buf.len(), BYTES.len());
+                        assert_eq!(full_buf.as_slice(), BYTES);
                     }));
                     if all.len() == CNT {
                         break;
@@ -161,9 +159,11 @@ async fn run_con(
         all.push(tokio::task::spawn(async move {
             tracing::debug!("About to write data");
             let mut data = BYTES.into();
+            let start = std::time::Instant::now();
             stream.write_bytes_all(&mut data).await.unwrap();
             stream.stop(0);
             tracing::info!(
+                elapsed_ms = %start.elapsed().as_millis(),
                 "WRITE SUCCESS {}",
                 WRITE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                     + 1

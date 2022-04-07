@@ -2,7 +2,7 @@ use super::*;
 
 pub struct StreamInfo {
     s_uniq: usize,
-
+    start: std::time::Instant,
     stream_id: quinn_proto::StreamId,
 
     read: Option<ReadStreamBackend>,
@@ -19,6 +19,7 @@ impl StreamInfo {
     ) -> Self {
         Self {
             s_uniq: uniq(),
+            start: std::time::Instant::now(),
             stream_id,
             read: Some(read),
             readable: true,
@@ -33,6 +34,7 @@ impl StreamInfo {
     ) -> Self {
         Self {
             s_uniq: uniq(),
+            start: std::time::Instant::now(),
             stream_id,
             read: None,
             readable: false,
@@ -48,6 +50,7 @@ impl StreamInfo {
     ) -> Self {
         Self {
             s_uniq: uniq(),
+            start: std::time::Instant::now(),
             stream_id,
             read: Some(read),
             readable: true,
@@ -171,6 +174,10 @@ impl StreamInfo {
                             if chunk.bytes.len() > p.max_len() {
                                 panic!("unexpected large chunk");
                             }
+                            tracing::trace!(
+                                elapsed_ms = %self.start.elapsed().as_millis(),
+                                byte_count = %chunk.bytes.len(),
+                            );
 
                             p.send(chunk.bytes);
                         }

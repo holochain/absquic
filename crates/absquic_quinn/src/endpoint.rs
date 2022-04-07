@@ -60,9 +60,9 @@ impl<Runtime: AsyncRuntime> EndpointDriver<Runtime> {
         udp_packet_send: MultiSender<OutUdpPacket>,
         udp_packet_recv: MultiReceiver<UdpBackendEvt>,
     ) -> (MultiSender<EndpointCmd>, MultiReceiver<EndpointEvt>) {
-        let (ep_cmd_send, ep_cmd_recv) = Runtime::channel(16);
-        let (evt_send, evt_recv) = Runtime::channel(16);
-        let (cmd_send, cmd_recv) = Runtime::channel(16);
+        let (ep_cmd_send, ep_cmd_recv) = Runtime::channel(CHAN_CAP);
+        let (evt_send, evt_recv) = Runtime::channel(CHAN_CAP);
+        let (cmd_send, cmd_recv) = Runtime::channel(CHAN_CAP);
 
         let ep_cmd_recv = futures_util::stream::select_all(vec![
             ep_cmd_recv.boxed(),

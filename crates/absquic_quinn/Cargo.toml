@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 absquic_core = { version = "0.0.1", path = "../absquic_core" }
 futures-util = "0.3.21"
+futures-executor = "0.3.21"
 pin-project-lite = "0.2.4"
 quinn-proto = "0.8.2"
 rcgen = { version = "0.9.2", optional = true }

@@ -70,14 +70,13 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
                 }
             };
 
-        for _ in 0..32 {
+        // always looping through all poll()s for now
+        loop {
             if check_send_permit(&mut send_permit) {
                 break;
             }
 
             if let Some(evt) = connection.poll() {
-                *more_work = true;
-
                 Self::handle_event(
                     streams,
                     inbound_datagrams,
@@ -86,6 +85,7 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
                     outbound_uni,
                     outbound_bi,
                     &mut send_permit,
+                    more_work,
                     evt,
                 )?;
             } else {
@@ -93,7 +93,7 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             }
         }
 
-        for _ in 0..32 {
+        for _ in 0..CHAN_CAP {
             if !*inbound_datagrams {
                 break;
             }
@@ -103,7 +103,6 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             }
 
             if let Some(bytes) = connection.datagrams().recv() {
-                *more_work = true;
                 if let Some(send_permit) = send_permit.take() {
                     send_permit.send(ConnectionEvt::InDatagram(bytes));
                 }
@@ -113,7 +112,7 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             }
         }
 
-        for _ in 0..32 {
+        for _ in 0..CHAN_CAP {
             if !*inbound_uni {
                 break;
             }
@@ -125,7 +124,6 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             if let Some(stream_id) =
                 connection.streams().accept(quinn_proto::Dir::Uni)
             {
-                *more_work = true;
                 let (rb, rf) = read_stream_pair::<Runtime>(BYTES_CAP);
                 let info = StreamInfo::uni_in(stream_id, rb);
                 streams.insert(stream_id, info);
@@ -138,7 +136,7 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             }
         }
 
-        for _ in 0..32 {
+        for _ in 0..CHAN_CAP {
             if !*inbound_bi {
                 break;
             }
@@ -150,7 +148,6 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             if let Some(stream_id) =
                 connection.streams().accept(quinn_proto::Dir::Bi)
             {
-                *more_work = true;
                 let (wb, wf) = write_stream_pair::<Runtime>(BYTES_CAP);
                 let (rb, rf) = read_stream_pair::<Runtime>(BYTES_CAP);
                 let info = StreamInfo::bi(stream_id, rb, wb);
@@ -164,6 +161,10 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             }
         }
 
+        if *inbound_datagrams || *inbound_uni || *inbound_bi {
+            *more_work = true;
+        }
+
         Ok(())
     }
 
@@ -175,6 +176,7 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
         outbound_uni: &mut bool,
         outbound_bi: &mut bool,
         send_permit: &mut Option<OnceSender<ConnectionEvt>>,
+        more_work: &mut bool,
         evt: quinn_proto::Event,
     ) -> AqResult<()> {
         tracing::trace!(?evt);
@@ -196,9 +198,13 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
                 try_send(ConnectionEvt::Error(one_err::OneErr::new(reason)));
             }
             quinn_proto::Event::DatagramReceived => {
+                // inbound dgs are processed after events
+                // no need to set more_work yet...
                 *inbound_datagrams = true;
             }
             quinn_proto::Event::Stream(StreamEvent::Opened { dir }) => {
+                // inbound streams are processed after events
+                // no need to set more_work yet...
                 match dir {
                     quinn_proto::Dir::Uni => *inbound_uni = true,
                     quinn_proto::Dir::Bi => *inbound_bi = true,
@@ -206,11 +212,15 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
             }
             quinn_proto::Event::Stream(StreamEvent::Readable { id }) => {
                 if let Some(info) = streams.get_mut(&id) {
+                    // we need to re-process streams, set more_work
+                    *more_work = true;
                     info.set_readable();
                 }
             }
             quinn_proto::Event::Stream(StreamEvent::Writable { id }) => {
                 if let Some(info) = streams.get_mut(&id) {
+                    // we need to re-process streams, set more_work
+                    *more_work = true;
                     info.set_writable();
                 }
             }
@@ -228,6 +238,9 @@ impl<Runtime: AsyncRuntime> ConPollDriver<Runtime> {
                 }
             }
             quinn_proto::Event::Stream(StreamEvent::Available { dir }) => {
+                // outbound streams are processed before us
+                // we need to set more_work
+                *more_work = true;
                 match dir {
                     quinn_proto::Dir::Uni => *outbound_uni = true,
                     quinn_proto::Dir::Bi => *outbound_bi = true,

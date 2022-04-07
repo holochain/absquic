@@ -35,7 +35,9 @@ impl ConTransmitDriver {
             return Ok(());
         }
 
-        for _ in 0..32 {
+        let start = std::time::Instant::now();
+        let mut elapsed_ms = 0;
+        for _ in 0..CHAN_CAP {
             match this.udp_packet_send.poll_acquire(cx) {
                 Poll::Pending => return Ok(()),
                 Poll::Ready(Err(_)) => {
@@ -68,6 +70,15 @@ impl ConTransmitDriver {
                     }
                 }
             }
+
+            elapsed_ms = start.elapsed().as_millis();
+            if elapsed_ms >= 2 {
+                break;
+            }
+        }
+
+        if elapsed_ms >= 3 {
+            tracing::warn!(%elapsed_ms, "long con tx poll");
         }
 
         // if we didn't return, there is more work

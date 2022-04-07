@@ -77,10 +77,10 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
         MultiSender<ConCmd>,
         MultiReceiver<ConnectionEvt>,
     ) {
-        let (con_evt_send, con_evt_recv) = Runtime::channel(16);
-        let (cmd_send, cmd_recv) = Runtime::channel(16);
+        let (con_evt_send, con_evt_recv) = Runtime::channel(CHAN_CAP);
+        let (cmd_send, cmd_recv) = Runtime::channel(CHAN_CAP);
         let con = construct_connection::<Runtime>(cmd_send);
-        let (con_cmd_send, con_cmd_recv) = Runtime::channel(16);
+        let (con_cmd_send, con_cmd_recv) = Runtime::channel(CHAN_CAP);
 
         let con_cmd_recv = futures_util::stream::select_all(vec![
             con_cmd_recv.boxed(),
@@ -98,7 +98,7 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
 
         let con_poll = ConPollDriver::new(con_evt_send);
 
-        Runtime::spawn(Self {
+        let this = Self {
             ep_uniq,
             con_uniq: uniq(),
 
@@ -116,7 +116,9 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
             timer,
             ep_evt,
             con_poll,
-        });
+        };
+
+        Runtime::spawn(this);
 
         (con, con_cmd_send, con_evt_recv)
     }
@@ -175,6 +177,9 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
             let mut rm_stream = Vec::new();
             for (id, info) in this.streams.iter_mut() {
                 let mut rm = false;
+                // currently the streams allways poll until pending
+                // one one side or the other, so no need to ever
+                // set more_work to true
                 info.poll(cx, this.connection, &mut rm)?;
                 if rm {
                     rm_stream.push(*id);
@@ -232,7 +237,8 @@ impl<Runtime: AsyncRuntime> ConnectionDriver<Runtime> {
             }
 
             elapsed_ms = start.elapsed().as_millis();
-            if !more_work || elapsed_ms >= 10 {
+
+            if !more_work || elapsed_ms >= 20 {
                 break;
             }
         }

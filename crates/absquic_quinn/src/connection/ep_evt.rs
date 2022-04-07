@@ -41,7 +41,7 @@ impl EpEvtDriver {
 
         let mut cmd_send = None;
 
-        for _ in 0..32 {
+        for _ in 0..CHAN_CAP {
             if cmd_send.is_none() && !*this.con_cmd_send_closed {
                 match this.con_cmd_send.poll_acquire(cx) {
                     Poll::Pending => break,
