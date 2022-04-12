@@ -1,0 +1,23 @@
+[package]
+name = "absquic_tokio"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+absquic_core = { version = "0.0.1", path = "../absquic_core", default-features = false }
+atomic-waker = { version = "1.0.0", default-features = false }
+pin-project-lite = { version = "0.2.8", default-features = false }
+tokio = { version = "1.17.0", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1.17.0", default-features = false, features = [ "macros", "rt-multi-thread" ] }
+
+[package.metadata.docs.rs]
+# build docs.rs page with all features enabled so we can see the APIs
+all-features = true
+
+[features]
+default = []
+
+tokio_runtime = ["tokio/sync", "tokio/time", "tokio/rt"]
+tokio_udp = ["tokio/net"]

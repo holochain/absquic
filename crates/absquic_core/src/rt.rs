@@ -1,35 +1,8 @@
 //! Absquic_core runtime types
 
-use crate::ep::*;
-use crate::udp::*;
 use crate::*;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-
-// move chan types into here
-pub use crate::runtime::ChanResult;
-pub use crate::runtime::ChannelClosed;
-
-/// Get the next item from a futures_core::Stream
-pub async fn stream_recv<S: futures_core::Stream>(
-    s: Pin<&mut S>,
-) -> Option<S::Item> {
-    struct X<'lt, S: futures_core::Stream>(Pin<&'lt mut S>);
-
-    impl<'lt, S: futures_core::Stream> Future for X<'lt, S> {
-        type Output = Option<S::Item>;
-
-        fn poll(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Self::Output> {
-            futures_core::Stream::poll_next(self.0.as_mut(), cx)
-        }
-    }
-
-    X(s).await
-}
 
 /// Abstraction for a particular async / futures runtime
 pub trait Rt: 'static + Send + Sync {
@@ -63,36 +36,14 @@ pub trait Rt: 'static + Send + Sync {
     /// Note: until generic associated types are stable
     /// we have to make do with dynamic dispatch here
     fn one_shot<T: 'static + Send>(
-    ) -> (DynOnceSend<T>, AqFut<'static, Option<T>>);
+    ) -> (DynOnceSend<T>, BoxFut<'static, Option<T>>);
 
     /// Creates a channel for multiple data transfer
     ///
     /// Note: until generic associated types are stable
     /// we have to make do with dynamic dispatch here
-    fn channel<T: 'static + Send>() -> (
-        DynMultiSend<T, <<Self as Rt>::Semaphore as Semaphore>::GuardTy>,
-        DynMultiRecv<T, <<Self as Rt>::Semaphore as Semaphore>::GuardTy>,
-    );
-}
-
-/// Helper trait for getting an endpoint builder for a particular runtime
-pub trait RtEndpointBuilder<R: Rt> {
-    /// Get an endpoint builder for this particular runtime
-    fn bind<U, E>(udp: U, ep: E) -> E::BindFut
-    where
-        U: UdpFactory,
-        E: EpFactory;
-}
-
-impl<R: Rt> RtEndpointBuilder<R> for R {
-    #[inline(always)]
-    fn bind<U, E>(udp: U, ep: E) -> E::BindFut
-    where
-        U: UdpFactory,
-        E: EpFactory,
-    {
-        ep.bind::<R, U>(udp)
-    }
+    fn channel<T: 'static + Send>(
+    ) -> (DynMultiSend<T>, BoxRecv<'static, T>);
 }
 
 /// OnceSend
@@ -115,17 +66,9 @@ pub trait Semaphore: 'static + Send + Sync {
 
 /// MultiSend
 pub trait MultiSend<T: 'static + Send>: 'static + Send + Sync {
-    /// The guard type for this semaphore
-    type GuardTy: SemaphoreGuard;
-
     /// Send
-    fn send(&self, t: T, g: Self::GuardTy) -> ChanResult<()>;
+    fn send(&self, t: T) -> Result<()>;
 }
 
 /// MultiSend
-pub type DynMultiSend<T, G> =
-    Arc<dyn MultiSend<T, GuardTy = G> + 'static + Send + Sync>;
-
-/// MultiRecv
-pub type DynMultiRecv<T, G> =
-    Pin<Box<dyn futures_core::Stream<Item = (T, G)> + 'static + Send>>;
+pub type DynMultiSend<T> = Arc<dyn MultiSend<T> + 'static + Send + Sync>;

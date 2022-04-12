@@ -4,19 +4,8 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
-bytes = "1.1.0"
-futures-core = { version = "0.3.21", default-features = false }
-one_err = "0.0.5"
-parking_lot = "0.12.0"
-pin-project-lite = "0.2.8"
-tokio = { version = "1.17.0", default-features = false, optional = true }
-
-[target.'cfg(loom)'.dependencies]
-loom = { version = "0.5.4", features = ["futures", "checkpoint"] }
-
-[dev-dependencies]
-futures = "0.3.21"
-tokio = { version = "1.17.0", features = [ "full" ] }
+bytes = { version = "1.1.0", default-features = false }
+futures-core = { version = "0.3.21", default-features = false, features = [ "alloc" ] }
 
 [package.metadata.docs.rs]
 # build docs.rs page with all features enabled so we can see the APIs
@@ -24,6 +13,3 @@ all-features = true
 
 [features]
 default = []
-
-tokio_runtime = ["tokio", "tokio/sync", "tokio/time", "tokio/rt"]
-tokio_udp = ["tokio", "tokio/net"]

@@ -23,9 +23,6 @@ pub struct UdpPak {
 
     /// Optional explicit congestion notification bits
     pub ecn: Option<u8>,
-
-    /// Optional delay for outgoing packets
-    pub at: Option<std::time::Instant>,
 }
 
 /// A udp backend handle
@@ -34,10 +31,10 @@ pub trait Udp: 'static + Send + Sync {
     type CloseImmedFut: Future<Output = ()> + 'static + Send;
 
     /// Addr future return type
-    type AddrFut: Future<Output = AqResult<SocketAddr>> + 'static + Send;
+    type AddrFut: Future<Output = Result<SocketAddr>> + 'static + Send;
 
     /// Send future return type
-    type SendFut: Future<Output = AqResult<()>> + 'static + Send;
+    type SendFut: Future<Output = Result<()>> + 'static + Send;
 
     /// Immediately shutdown the socket - data in flight may be lost
     fn close_immediate(&self) -> Self::CloseImmedFut;
@@ -55,12 +52,12 @@ pub trait UdpFactory: 'static + Send {
     type UdpTy: Udp;
 
     /// The udp backend packet receiver stream to return on bind
-    type UdpRecvTy: futures_core::Stream<Item = AqResult<UdpPak>>
+    type UdpRecvTy: futures_core::Stream<Item = Result<UdpPak>>
         + 'static
         + Send;
 
     /// Bind future return type
-    type BindFut: Future<Output = AqResult<(Self::UdpTy, Self::UdpRecvTy)>>
+    type BindFut: Future<Output = Result<(Self::UdpTy, Self::UdpRecvTy)>>
         + 'static
         + Send;
 

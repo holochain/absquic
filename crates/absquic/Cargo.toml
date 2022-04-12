@@ -4,16 +4,16 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
-absquic_core = { version = "0.0.1", path = "../absquic_core" }
-
-absquic_quinn = { version = "0.0.1", path = "../absquic_quinn", optional = true }
-absquic_quinn_udp = { version = "0.0.1", path = "../absquic_quinn_udp", optional = true }
-tokio = { version = "1.17.0", optional = true }
+absquic_core = { version = "0.0.1", path = "../absquic_core", default-features = false }
+absquic_tokio = { version = "0.0.1", path = "../absquic_tokio", default-features = false, optional = true }
+#absquic_quinn = { version = "0.0.1", path = "../absquic_quinn", optional = true }
+#absquic_quinn_udp = { version = "0.0.1", path = "../absquic_quinn_udp", optional = true }
+#tokio = { version = "1.17.0", optional = true }
 
 [dev-dependencies]
-absquic_core = { version = "0.0.1", path = "../absquic_core", features = [ "tokio_runtime" ] }
-absquic_quinn = { version = "0.0.1", path = "../absquic_quinn", features = [ "dev_utils" ] }
-absquic_quinn_udp = { version = "0.0.1", path = "../absquic_quinn_udp" }
+#absquic_core = { version = "0.0.1", path = "../absquic_core", features = [ "tokio_runtime" ] }
+#absquic_quinn = { version = "0.0.1", path = "../absquic_quinn", features = [ "dev_utils" ] }
+#absquic_quinn_udp = { version = "0.0.1", path = "../absquic_quinn_udp" }
 tokio = { version = "1.17.0", features = [ "full" ] }
 
 [package.metadata.docs.rs]
@@ -22,5 +22,6 @@ all-features = true
 
 [features]
 default = []
-tokio_runtime = ["absquic_core/tokio_runtime"]
-quinn_dev_utils = ["absquic_quinn", "absquic_quinn/dev_utils"]
+
+tokio_runtime = [ "absquic_tokio", "absquic_tokio/tokio_runtime" ]
+tokio_udp = [ "absquic_tokio", "absquic_tokio/tokio_udp" ]

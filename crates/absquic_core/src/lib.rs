@@ -6,46 +6,23 @@
 use std::future::Future;
 use std::task::Context;
 use std::task::Poll;
+use std::pin::Pin;
 
 /// Re-exported dependencies
 pub mod deps {
     pub use bytes;
-    pub use one_err;
-    pub use parking_lot;
+    pub use futures_core;
 }
 
-#[cfg(loom)]
-mod loom_sync;
+pub use std::io::Result;
 
-#[cfg(loom)]
-pub(crate) mod sync {
-    pub(crate) use super::loom_sync::*;
-}
-
-#[cfg(not(loom))]
-pub(crate) mod sync {
-    pub(crate) use parking_lot::Mutex;
-    pub(crate) use std::sync::atomic;
-    pub(crate) use std::sync::Arc;
-
-    #[cfg(test)]
-    pub(crate) use futures::executor::block_on;
-    #[cfg(test)]
-    pub(crate) use std::thread;
-}
-
-/// Absquic result type
-pub type AqResult<T> = std::result::Result<T, one_err::OneErr>;
-
-/// Absquic box future alias type
-type AqBoxFut<'lt, T> = std::pin::Pin<Box<dyn Future<Output = T> + 'lt + Send>>;
-
-/// Absquic future type
+/// Absquic boxed future type
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct AqFut<'lt, T>(AqBoxFut<'lt, T>);
+pub struct BoxFut<'lt, T>(pub futures_core::future::BoxFuture<'lt, T>);
 
-impl<'lt, T> AqFut<'lt, T> {
-    /// Construct a new absquic future from a generic future
+impl<'lt, T> BoxFut<'lt, T> {
+    /// Construct a new absquic boxed future from a generic future
+    #[inline(always)]
     pub fn new<F>(f: F) -> Self
     where
         F: Future<Output = T> + 'static + Send,
@@ -54,9 +31,10 @@ impl<'lt, T> AqFut<'lt, T> {
     }
 }
 
-impl<'lt, T> Future for AqFut<'lt, T> {
+impl<'lt, T> Future for BoxFut<'lt, T> {
     type Output = T;
 
+    #[inline(always)]
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -65,26 +43,68 @@ impl<'lt, T> Future for AqFut<'lt, T> {
     }
 }
 
+/// Absquic helper until `std::io::Error::other()` is stablized
+pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(error: E) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, error)
+}
+
+/// Absquic boxed stream receiver type
+pub struct BoxRecv<'lt, T>(pub futures_core::stream::BoxStream<'lt, T>);
+
+impl<'lt, T> BoxRecv<'lt, T> {
+    /// Construct a new absquic boxed stream receiver from generic
+    #[inline(always)]
+    pub fn new<S>(s: S) -> Self
+    where
+        S: futures_core::stream::Stream<Item = T> + 'static + Send,
+    {
+        Self(Box::pin(s))
+    }
+
+    /// Poll this stream receiver for the next item
+    #[inline(always)]
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        <dyn futures_core::stream::Stream<Item = T>>::poll_next(self.0.as_mut(), cx)
+    }
+
+    /// Attempt to pull the next item from this stream receiver
+    #[inline(always)]
+    pub async fn recv(&mut self) -> Option<T> {
+        struct X<'lt, 'a, T>(&'a mut BoxRecv<'lt, T>);
+
+        impl<'lt, 'a, T> Future for X<'lt, 'a, T> {
+            type Output = Option<T>;
+
+            fn poll(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Self::Output> {
+                futures_core::Stream::poll_next(self.0.0.as_mut(), cx)
+            }
+        }
+
+        X(self).await
+    }
+}
+
+impl<'lt, T> futures_core::stream::Stream for BoxRecv<'lt, T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        <dyn futures_core::stream::Stream<Item = T>>::poll_next(self.0.as_mut(), cx)
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        <dyn futures_core::stream::Stream<Item = T>>::size_hint(&self.0)
+    }
+}
+
 pub mod con;
 pub mod ep;
 pub mod rt;
 pub mod udp;
-
-#[cfg(any(test, feature = "tokio_udp"))]
-pub mod tokio_udp;
-
-// Semaphore limit for both endpoint and connection commands.
-// We want this to be high enough we don't experience deadlocks
-// on legitimate long-term acquires like waiting on stream availability,
-// but small enough that implementations can buffer all incoming
-// response OnceSenders without worrying about memory bounds
-const CMD_LIMIT: usize = 128;
-
-pub mod backend;
-pub mod connection;
-pub mod endpoint;
-pub mod runtime;
-pub mod stream;
-
-#[cfg(any(test, feature = "tokio_runtime"))]
-pub mod tokio_runtime;
