@@ -6,9 +6,10 @@ edition = "2021"
 [dependencies]
 absquic_core = { version = "0.0.1", path = "../absquic_core", default-features = false }
 boring = { version = "2.0.0", default-features = false }
-rcgen = { version = "0.9.2", default-features = false, optional = true }
+pin-project = { version = "1.0.10", default-features = false }
 #quiche = { version = "0.12.0", default-features = false }
 quiche = { git = "https://github.com/cloudflare/quiche.git", rev="ffb945a10b302a304dc15df6a3c04d568f825307", default-features = false, features = [ "boringssl-boring-crate" ] }
+rcgen = { version = "0.9.2", default-features = false, optional = true }
 
 [dev-dependencies]
 absquic_tokio = { version = "0.0.1", path = "../absquic_tokio", features = [ "tokio_runtime", "tokio_udp" ] }

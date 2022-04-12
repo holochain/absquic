@@ -4,9 +4,9 @@
 //! Absquic_core quic state-machine abstraction
 
 use std::future::Future;
+use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
-use std::pin::Pin;
 
 /// Re-exported dependencies
 pub mod deps {
@@ -44,8 +44,30 @@ impl<'lt, T> Future for BoxFut<'lt, T> {
 }
 
 /// Absquic helper until `std::io::Error::other()` is stablized
-pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(error: E) -> std::io::Error {
+pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
+    error: E,
+) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, error)
+}
+
+/// receive an item from a stream
+pub async fn stream_recv<S: futures_core::stream::Stream>(
+    s: Pin<&mut S>,
+) -> Option<S::Item> {
+    struct X<'a, S: futures_core::stream::Stream>(Pin<&'a mut S>);
+
+    impl<'a, S: futures_core::stream::Stream> Future for X<'a, S> {
+        type Output = Option<S::Item>;
+
+        fn poll(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Self::Output> {
+            futures_core::Stream::poll_next(self.0.as_mut(), cx)
+        }
+    }
+
+    X(s).await
 }
 
 /// Absquic boxed stream receiver type
@@ -64,7 +86,10 @@ impl<'lt, T> BoxRecv<'lt, T> {
     /// Poll this stream receiver for the next item
     #[inline(always)]
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        <dyn futures_core::stream::Stream<Item = T>>::poll_next(self.0.as_mut(), cx)
+        <dyn futures_core::stream::Stream<Item = T>>::poll_next(
+            self.0.as_mut(),
+            cx,
+        )
     }
 
     /// Attempt to pull the next item from this stream receiver
@@ -79,7 +104,7 @@ impl<'lt, T> BoxRecv<'lt, T> {
                 mut self: Pin<&mut Self>,
                 cx: &mut Context<'_>,
             ) -> Poll<Self::Output> {
-                futures_core::Stream::poll_next(self.0.0.as_mut(), cx)
+                futures_core::Stream::poll_next(self.0 .0.as_mut(), cx)
             }
         }
 
@@ -95,7 +120,10 @@ impl<'lt, T> futures_core::stream::Stream for BoxRecv<'lt, T> {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        <dyn futures_core::stream::Stream<Item = T>>::poll_next(self.0.as_mut(), cx)
+        <dyn futures_core::stream::Stream<Item = T>>::poll_next(
+            self.0.as_mut(),
+            cx,
+        )
     }
 
     #[inline(always)]

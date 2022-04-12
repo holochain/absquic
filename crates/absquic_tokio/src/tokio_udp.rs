@@ -1,7 +1,7 @@
 //! `feature = "tokio_udp"` Absquic_core Udp backed by tokio
 
-use absquic_core::udp::*;
 use absquic_core::deps::futures_core;
+use absquic_core::udp::*;
 use absquic_core::*;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -53,10 +53,7 @@ impl Future for TokioUdpCloseImmedFut {
     type Output = ();
 
     #[inline(always)]
-    fn poll(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         Poll::Ready(())
     }
 }
@@ -80,16 +77,10 @@ impl Future for TokioUdpAddrFut {
 pub struct TokioUdpSendFut(BoxFut<'static, Result<()>>);
 
 impl TokioUdpSendFut {
-    fn priv_new(
-        sock: Arc<tokio::net::UdpSocket>,
-        pak: UdpPak,
-    ) -> Self {
+    fn priv_new(sock: Arc<tokio::net::UdpSocket>, pak: UdpPak) -> Self {
         // just taking the boxing route for now, because it's much easier
         Self(BoxFut::new(async move {
-            sock
-                .send_to(&pak.data, pak.addr)
-                .await
-                .map(|_| ())
+            sock.send_to(&pak.data, pak.addr).await.map(|_| ())
         }))
     }
 
@@ -117,10 +108,7 @@ pub struct TokioUdp {
 }
 
 impl TokioUdp {
-    fn new(
-        shutdown: Shutdown,
-        sock: Weak<tokio::net::UdpSocket>,
-    ) -> Self {
+    fn new(shutdown: Shutdown, sock: Weak<tokio::net::UdpSocket>) -> Self {
         Self { shutdown, sock }
     }
 }
@@ -165,7 +153,11 @@ impl TokioUdpRecv {
         max_udp_size: usize,
     ) -> Self {
         let buf = vec![0; max_udp_size].into_boxed_slice();
-        Self { shutdown, sock, buf }
+        Self {
+            shutdown,
+            sock,
+            buf,
+        }
     }
 }
 
@@ -211,10 +203,7 @@ impl TokioUdpFactory {
     /// Construct a new TokioUdpFactory set to bind to `addr`
     pub fn new(addr: SocketAddr, max_udp_size: Option<usize>) -> Self {
         let max_udp_size = std::cmp::max(64 * 1024, max_udp_size.unwrap_or(0));
-        Self {
-            addr,
-            max_udp_size,
-        }
+        Self { addr, max_udp_size }
     }
 }
 

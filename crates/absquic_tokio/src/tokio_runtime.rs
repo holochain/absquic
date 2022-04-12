@@ -1,13 +1,13 @@
 //! `feature = "tokio_runtime"` Absquic_core AsyncRuntime backed by tokio
 
-use absquic_core::rt;
 use absquic_core::deps::futures_core;
+use absquic_core::rt;
 use absquic_core::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
 use std::task::Context;
+use std::task::Poll;
 
 /// `feature = "tokio_runtime"` Spawn result future type.
 /// This item is intentionally NOT #\[must_use\]
@@ -164,8 +164,8 @@ impl rt::Rt for TokioRt {
     }
 
     #[inline(always)]
-    fn channel<T: 'static + Send>(
-    ) -> (rt::DynMultiSend<T>, BoxRecv<'static, T>) {
+    fn channel<T: 'static + Send>() -> (rt::DynMultiSend<T>, BoxRecv<'static, T>)
+    {
         let (s, r) = tokio::sync::mpsc::unbounded_channel();
         (Arc::new(TokioMultiSend(s)), BoxRecv::new(TokioMultiRecv(r)))
     }

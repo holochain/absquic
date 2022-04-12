@@ -1,7 +1,6 @@
 //! Absquic_core endpoint types
 
 use crate::con::*;
-use crate::udp::*;
 use crate::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,7 +9,7 @@ use std::sync::Arc;
 pub enum EpEvt<ConTy, ConRecvTy>
 where
     ConTy: Con,
-    ConRecvTy: futures_core::Stream<Item = ConEvt>,
+    ConRecvTy: futures_core::Stream<Item = ConEvt> + 'static + Send + Unpin,
 {
     /// Received a new incoming connection
     InCon(ConTy, ConRecvTy),
@@ -25,7 +24,7 @@ pub trait Ep: 'static + Send + Sync {
     type ConTy: Con;
 
     /// Connection event receiver type
-    type ConRecvTy: futures_core::Stream<Item = ConEvt> + 'static + Send;
+    type ConRecvTy: futures_core::Stream<Item = ConEvt> + 'static + Send + Unpin;
 
     /// Addr future return type
     type AddrFut: Future<Output = Result<SocketAddr>> + 'static + Send;
@@ -121,13 +120,13 @@ impl Ep for DynEp {
     }
 }
 
-/// A Factory for constructing a pre-configured quic endpoint
+/// A factory for constructing a pre-configured quic endpoint
 pub trait EpFactory: 'static + Send {
     /// The connection backend handle type
     type ConTy: Con;
 
     /// The connection backend event receiver stream
-    type ConRecvTy: futures_core::Stream<Item = ConEvt> + 'static + Send;
+    type ConRecvTy: futures_core::Stream<Item = ConEvt> + 'static + Send + Unpin;
 
     /// The endpoint backend handle type to return on bind
     type EpTy: Ep;
@@ -135,7 +134,8 @@ pub trait EpFactory: 'static + Send {
     /// The endpoint backend event receiver stream to return on bind
     type EpRecvTy: futures_core::Stream<Item = EpEvt<Self::ConTy, Self::ConRecvTy>>
         + 'static
-        + Send;
+        + Send
+        + Unpin;
 
     /// Bind future return type
     type BindFut: Future<Output = Result<(Self::EpTy, Self::EpRecvTy)>>
@@ -143,5 +143,71 @@ pub trait EpFactory: 'static + Send {
         + Send;
 
     /// Bind a new quic backend endpoint
-    fn bind<U: UdpFactory>(self, udp: U) -> Self::BindFut;
+    fn bind(self) -> Self::BindFut;
+}
+
+/// Dynamic dispatch factory for constructing a pre-configured quic endpoint
+pub struct DynEpFactory(
+    Box<
+        dyn FnOnce() -> BoxFut<'static, Result<(DynEp, DynEpRecv)>>
+            + 'static
+            + Send,
+    >,
+);
+
+impl DynEpFactory {
+    /// Construct a dynamic ep factory from a generic one
+    pub fn new<F: EpFactory>(f: F) -> Self {
+        Self(Box::new(move || {
+            BoxFut::new(async move {
+                let (ep, recv) = f.bind().await?;
+                let ep = ep.into_dyn();
+                let recv = BoxRecv::new(ConvEpRecv(recv));
+                Ok((ep, recv))
+            })
+        }))
+    }
+}
+
+struct ConvEpRecv<
+    C: Con,
+    CRecv: futures_core::Stream<Item = ConEvt> + 'static + Send + Unpin,
+    Recv: futures_core::Stream<Item = EpEvt<C, CRecv>> + 'static + Send + Unpin,
+>(Recv);
+
+impl<
+        C: Con,
+        CRecv: futures_core::Stream<Item = ConEvt> + 'static + Send + Unpin,
+        Recv: futures_core::Stream<Item = EpEvt<C, CRecv>> + 'static + Send + Unpin,
+    > futures_core::Stream for ConvEpRecv<C, CRecv, Recv>
+{
+    type Item = EpEvt<DynCon, DynConRecv>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.0).poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(Some(evt)) => match evt {
+                EpEvt::InCon(con, recv) => {
+                    let con = con.into_dyn();
+                    let recv = BoxRecv::new(recv);
+                    Poll::Ready(Some(EpEvt::InCon(con, recv)))
+                }
+            },
+        }
+    }
+}
+
+impl EpFactory for DynEpFactory {
+    type ConTy = DynCon;
+    type ConRecvTy = DynConRecv;
+    type EpTy = DynEp;
+    type EpRecvTy = DynEpRecv;
+    type BindFut = BoxFut<'static, Result<(DynEp, DynEpRecv)>>;
+    fn bind(self) -> Self::BindFut {
+        (self.0)()
+    }
 }

@@ -54,7 +54,8 @@ pub trait UdpFactory: 'static + Send {
     /// The udp backend packet receiver stream to return on bind
     type UdpRecvTy: futures_core::Stream<Item = Result<UdpPak>>
         + 'static
-        + Send;
+        + Send
+        + Unpin;
 
     /// Bind future return type
     type BindFut: Future<Output = Result<(Self::UdpTy, Self::UdpRecvTy)>>

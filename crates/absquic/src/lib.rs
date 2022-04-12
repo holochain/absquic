@@ -21,8 +21,8 @@ pub mod deps {
 
 #[doc(inline)]
 pub use absquic_core::{
+    con::{ConEvt, DynCon, DynConRecv},
     ep::{DynEp, DynEpRecv, EpEvt},
-    con::{DynCon, DynConRecv, ConEvt},
 };
 
 #[cfg(feature = "tokio_runtime")]

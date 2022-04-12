@@ -42,8 +42,7 @@ pub trait Rt: 'static + Send + Sync {
     ///
     /// Note: until generic associated types are stable
     /// we have to make do with dynamic dispatch here
-    fn channel<T: 'static + Send>(
-    ) -> (DynMultiSend<T>, BoxRecv<'static, T>);
+    fn channel<T: 'static + Send>() -> (DynMultiSend<T>, BoxRecv<'static, T>);
 }
 
 /// OnceSend
