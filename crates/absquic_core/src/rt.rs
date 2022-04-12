@@ -61,6 +61,9 @@ pub trait Semaphore: 'static + Send + Sync {
 
     /// Acquire a semaphore permit guard
     fn acquire(&self) -> Self::AcquireFut;
+
+    /// Attempt to acquire an avaliable semaphore permit guard without blocking
+    fn try_acquire(&self) -> Option<Self::GuardTy>;
 }
 
 /// MultiSend

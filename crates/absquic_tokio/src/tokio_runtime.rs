@@ -83,6 +83,14 @@ impl rt::Semaphore for TokioSemaphore {
             TokioSemaphoreGuard(guard)
         }))
     }
+
+    #[inline(always)]
+    fn try_acquire(&self) -> Option<Self::GuardTy> {
+        match self.0.clone().try_acquire_owned() {
+            Ok(g) => Some(TokioSemaphoreGuard(g)),
+            _ => None,
+        }
+    }
 }
 
 /// `feature = "tokio_runtime"` Channel sender type

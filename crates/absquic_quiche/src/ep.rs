@@ -61,10 +61,10 @@ where
     let (ep_cmd_send, ep_cmd_recv) =
         R::channel::<(EpCmd<R>, <<R as Rt>::Semaphore as Semaphore>::GuardTy)>(
         );
-    let (_ep_evt_send, ep_evt_recv) = R::channel();
+    let (ep_evt_send, ep_evt_recv) = R::channel();
 
     R::spawn(udp_task::<R, _>(udp_recv, ep_cmd_send.clone()));
-    R::spawn(ep_task::<R, _>(config, udp_send.clone(), ep_cmd_recv));
+    R::spawn(ep_task::<R, _>(config, udp_send.clone(), ep_evt_send, ep_cmd_recv));
 
     let limit = R::semaphore(64);
     let ep = QuicheEp {
@@ -159,6 +159,7 @@ async fn udp_task<R, URecv>(
 async fn ep_task<R, U>(
     mut config: quiche::Config,
     _udp_send: Arc<U>,
+    ep_evt_send: DynMultiSend<(EpEvt<QuicheCon<R>, QuicheConRecv<R>>, <<R as Rt>::Semaphore as Semaphore>::GuardTy)>,
     mut ep_cmd_recv: BoxRecv<
         'static,
         (EpCmd<R>, <<R as Rt>::Semaphore as Semaphore>::GuardTy),
@@ -167,17 +168,82 @@ async fn ep_task<R, U>(
     R: Rt,
     U: Udp,
 {
-    let mut con_map: HashMap<quiche::ConnectionId<'static>, ConCmdSend<R>> =
+    let evt_limit = R::semaphore(64);
+
+    struct ConInfo<R: Rt> {
+        limit: R::Semaphore,
+        con_cmd_send: ConCmdSend<R>,
+    }
+
+    let mut con_map: HashMap<quiche::ConnectionId<'static>, ConInfo<R>> =
         HashMap::new();
 
+    let mut evt_guard = None;
+
     while let Some((cmd, _g)) = ep_cmd_recv.recv().await {
+        if evt_guard.is_none() {
+            evt_guard = Some(evt_limit.acquire().await);
+        }
+
         match cmd {
-            EpCmd::InPak(_maybe_pak) => {}
+            EpCmd::InPak(maybe_pak) => {
+                let maybe_pak = match maybe_pak {
+                    None => {
+                        tracing::warn!("udp recv stream ended");
+                        break;
+                    }
+                    Some(pak) => pak,
+                };
+
+                let mut pak = match maybe_pak {
+                    Err(err) => {
+                        tracing::error!(?err, "udp recv stream error");
+                        // this may not be fatal
+                        continue;
+                    }
+                    Ok(pak) => pak,
+                };
+
+                let hdr = match quiche::Header::from_slice(
+                    pak.data.as_mut_slice(),
+                    16,
+                ) {
+                    Err(err) => {
+                        tracing::warn!(?err, "malformed inbound udp packet");
+                        continue;
+                    }
+                    Ok(hdr) => hdr,
+                };
+
+                tracing::trace!(?hdr);
+
+                if let Some(info) = con_map.get(&hdr.dcid) {
+                    if let Some(g) = info.limit.try_acquire() {
+                        if let Err(_) = info.con_cmd_send.send((ConCmd::InPak(pak), g)) {
+                            con_map.remove(&hdr.dcid);
+                        }
+                    } // otherwise we just drop it... it's udp : )
+                } else if hdr.ty == quiche::Type::Initial {
+                    let scid = cid();
+                    let _con = quiche::accept(&scid, None, pak.addr, &mut config);
+                    let (con, con_recv, con_cmd_send) = quiche_con::<R>(pak.addr);
+                    con_map.insert(scid, ConInfo {
+                        limit: R::semaphore(64),
+                        con_cmd_send,
+                    });
+                    if let Err(_) = ep_evt_send.send((EpEvt::InCon(con, con_recv), evt_guard.take().unwrap())) {
+                        // TODO - wha?
+                    }
+                }
+            }
             EpCmd::NewCon(addr, rsp) => {
                 let scid = cid();
                 let _con = quiche::connect(None, &scid, addr, &mut config);
                 let (con, con_recv, con_cmd_send) = quiche_con(addr);
-                con_map.insert(scid, con_cmd_send);
+                con_map.insert(scid, ConInfo {
+                    limit: R::semaphore(64),
+                    con_cmd_send,
+                });
                 rsp(Ok((con, con_recv)));
             }
         }

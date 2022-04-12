@@ -1,6 +1,7 @@
 //! Absquic quiche con
 
 use absquic_core::con::*;
+use absquic_core::udp::*;
 use absquic_core::deps::futures_core;
 use absquic_core::rt::*;
 use absquic_core::*;
@@ -64,7 +65,9 @@ where
     (con, recv, con_cmd_send)
 }
 
-pub(crate) enum ConCmd {}
+pub(crate) enum ConCmd {
+    InPak(UdpPak),
+}
 
 /// Absquic quiche con
 pub struct QuicheCon<R>
