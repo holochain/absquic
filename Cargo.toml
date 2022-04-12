@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/absquic",
+  "crates/absquic_quiche",
   "crates/absquic_quinn",
   "crates/absquic_quinn_udp",
   "crates/absquic_core",

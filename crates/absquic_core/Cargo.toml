@@ -8,6 +8,7 @@ bytes = "1.1.0"
 futures-core = { version = "0.3.21", default-features = false }
 one_err = "0.0.5"
 parking_lot = "0.12.0"
+pin-project-lite = "0.2.8"
 tokio = { version = "1.17.0", default-features = false, optional = true }
 
 [target.'cfg(loom)'.dependencies]
@@ -24,5 +25,5 @@ all-features = true
 [features]
 default = []
 
-# oddly enough, we don't need the 'rt' feature : )
-tokio_runtime = ["tokio", "tokio/sync", "tokio/time"]
+tokio_runtime = ["tokio", "tokio/sync", "tokio/time", "tokio/rt"]
+tokio_udp = ["tokio", "tokio/net"]

@@ -65,6 +65,14 @@ impl<'lt, T> Future for AqFut<'lt, T> {
     }
 }
 
+pub mod con;
+pub mod ep;
+pub mod rt;
+pub mod udp;
+
+#[cfg(any(test, feature = "tokio_udp"))]
+pub mod tokio_udp;
+
 // Semaphore limit for both endpoint and connection commands.
 // We want this to be high enough we don't experience deadlocks
 // on legitimate long-term acquires like waiting on stream availability,
