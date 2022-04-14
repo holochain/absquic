@@ -3,6 +3,8 @@
 #![deny(unsafe_code)]
 //! Absquic quiche quic/http3 backend implementation
 
+pub(crate) mod bound_multi_send;
+pub(crate) use bound_multi_send::*;
 pub mod con;
 pub mod ep;
 pub mod ep_factory;

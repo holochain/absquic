@@ -80,6 +80,7 @@ impl TokioUdpSendFut {
     fn priv_new(sock: Arc<tokio::net::UdpSocket>, pak: UdpPak) -> Self {
         // just taking the boxing route for now, because it's much easier
         Self(BoxFut::new(async move {
+            tracing::trace!(byte_count = %pak.data.len(), "udp send");
             sock.send_to(&pak.data, pak.addr).await.map(|_| ())
         }))
     }
@@ -181,6 +182,7 @@ impl futures_core::Stream for TokioUdpRecv {
             }
             Poll::Ready(Ok(addr)) => {
                 let data = buf.filled().to_vec();
+                tracing::trace!(byte_count = %data.len(), "udp recv");
                 Poll::Ready(Some(Ok(UdpPak {
                     addr,
                     data,
@@ -216,6 +218,7 @@ impl UdpFactory for TokioUdpFactory {
         BoxFut::new(async move {
             let shutdown = Shutdown::new();
             let sock = Arc::new(tokio::net::UdpSocket::bind(addr).await?);
+            tracing::info!(addr = ?sock.local_addr());
             let udp = TokioUdp::new(shutdown.clone(), Arc::downgrade(&sock));
             let udp_recv = TokioUdpRecv::new(shutdown, sock, max_udp_size);
             Ok((udp, udp_recv))

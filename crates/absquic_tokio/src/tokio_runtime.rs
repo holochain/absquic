@@ -129,6 +129,47 @@ impl<T: 'static + Send> futures_core::Stream for TokioMultiRecv<T> {
 /// `feature = "tokio_runtime"` Absquic_core AsyncRuntime backed by tokio
 pub struct TokioRt;
 
+impl TokioRt {
+    /// Spawn a task to execute the given future, return a future
+    /// that will complete when the task completes, but will not
+    /// affect the task if dropped / cancelled
+    pub fn spawn<F>(f: F) -> TokioSpawnFut
+    where
+        F: Future<Output = ()> + 'static + Send,
+    {
+        <TokioRt as rt::Rt>::spawn(f)
+    }
+
+    /// Returns a future that will complete at the specified instant,
+    /// or immediately if the instant is already past
+    pub fn sleep(until: std::time::Instant) -> TokioSleepFut {
+        <TokioRt as rt::Rt>::sleep(until)
+    }
+
+    /// Create an async semaphore instance
+    pub fn semaphore(limit: usize) -> TokioSemaphore {
+        <TokioRt as rt::Rt>::semaphore(limit)
+    }
+
+    /// Creates a slot for a single data transfer
+    ///
+    /// Note: until generic associated types are stable
+    /// we have to make do with dynamic dispatch here
+    pub fn one_shot<T: 'static + Send>(
+    ) -> (rt::DynOnceSend<T>, BoxFut<'static, Option<T>>) {
+        <TokioRt as rt::Rt>::one_shot()
+    }
+
+    /// Creates a channel for multiple data transfer
+    ///
+    /// Note: until generic associated types are stable
+    /// we have to make do with dynamic dispatch here
+    pub fn channel<T: 'static + Send>(
+    ) -> (rt::DynMultiSend<T>, BoxRecv<'static, T>) {
+        <TokioRt as rt::Rt>::channel()
+    }
+}
+
 impl rt::Rt for TokioRt {
     type SpawnFut = TokioSpawnFut;
     type SleepFut = TokioSleepFut;
